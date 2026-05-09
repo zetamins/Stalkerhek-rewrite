@@ -27,14 +27,20 @@ impl FilterStore {
 
     pub fn apply_rename(&self, profile_id: i32, title: &str) -> String {
         let mut t = title.to_string();
-        if let Some(prefix) = self.rename_prefix.get(&profile_id) {
-            if !prefix.is_empty() && t.starts_with(prefix) {
-                t = t[prefix.len()..].to_string();
+        if let Some(prefixes) = self.rename_prefix.get(&profile_id) {
+            for prefix in prefixes.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                if t.starts_with(prefix) {
+                    t = t[prefix.len()..].to_string();
+                    break;
+                }
             }
         }
-        if let Some(suffix) = self.rename_suffix.get(&profile_id) {
-            if !suffix.is_empty() && t.ends_with(suffix) {
-                t = t[..t.len() - suffix.len()].to_string();
+        if let Some(suffixes) = self.rename_suffix.get(&profile_id) {
+            for suffix in suffixes.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                if t.ends_with(suffix) {
+                    t = t[..t.len() - suffix.len()].to_string();
+                    break;
+                }
             }
         }
         t.trim().to_string()

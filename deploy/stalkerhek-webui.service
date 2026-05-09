@@ -1,0 +1,31 @@
+[Unit]
+Description=Stalkerhek Web UI
+After=network-online.target stalkerhek-engine.service
+Wants=network-online.target
+BindsTo=stalkerhek-engine.service
+
+[Service]
+Type=simple
+User=stalkerhek
+Group=stalkerhek
+WorkingDirectory=/opt/stalkerhek
+ExecStart=/usr/bin/java -jar /opt/stalkerhek/stalkerhek-webui.jar
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/stalkerhek/data
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Environment
+Environment=SESSION_SECRET=
+Environment=STALKERHEK_ENGINE_URL=http://127.0.0.1:9900
+Environment=STALKERHEK_DATA_DIR=/opt/stalkerhek/data
+
+[Install]
+WantedBy=multi-user.target

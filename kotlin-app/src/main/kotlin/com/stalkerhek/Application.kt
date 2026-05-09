@@ -27,6 +27,7 @@ fun main() {
     val authFile = System.getenv("STALKERHEK_AUTH_FILE") ?: "$persistDir/auth.json"
     val filtersFile = "$persistDir/filters.json"
     val rustApiUrl = System.getenv("STALKERHEK_ENGINE_URL") ?: "http://127.0.0.1:9900"
+    val sessionSecret = System.getenv("SESSION_SECRET") ?: error("SESSION_SECRET environment variable is required")
 
     val profileStore = ProfileStore(profilesFile)
     val authStore = AuthStore(authFile)
@@ -54,7 +55,7 @@ fun main() {
                 cookie.path = "/"
                 cookie.httpOnly = true
                 cookie.sameSite = SameSite.Strict
-                transform(SessionTransportTransformerMessageAuthentication("stalkerhek-secret-key-change-in-prod".toByteArray()))
+                transform(SessionTransportTransformerMessageAuthentication(sessionSecret.toByteArray()))
             }
         }
         install(StatusPages) {
