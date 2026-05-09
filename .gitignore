@@ -1,0 +1,15 @@
+# Rust
+rust-core/target/
+
+# Kotlin
+kotlin-app/build/
+kotlin-app/.gradle/
+kotlin-app/gradle/wrapper/gradle-wrapper.jar
+
+# Data files (user-specific config)
+data/
+
+# General
+*.log
+.env
+.DS_Store
