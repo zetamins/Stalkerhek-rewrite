@@ -7,19 +7,96 @@ use axum::{
     Router,
 };
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use std::sync::Mutex;
 use tokio::sync::RwLock;
 
 use crate::filter::FilterStore;
 use crate::stalker;
 
+/// Cached DNS resolver using European DNS upstreams, so CDN-backed
+/// stream hostnames resolve to European edge IPs and bypass geo-blocks.
+struct DnsEntry {
+    ips: Vec<IpAddr>,
+    expires: Instant,
+}
+
+static DNS_CACHE: std::sync::LazyLock<Mutex<HashMap<String, DnsEntry>>> = std::sync::LazyLock::new(|| {
+    Mutex::new(HashMap::new())
+});
+
+/// Resolve a hostname via Google DoH with an EDNS Client Subnet hint
+/// pointing to a European IP range. This causes the authoritative DNS
+/// to return European CDN/Cloudflare edge IPs.
+async fn resolve_european(hostname: &str) -> Vec<IpAddr> {
+    // Check cache first
+    {
+        let cache = DNS_CACHE.lock().unwrap();
+        if let Some(entry) = cache.get(hostname) {
+            if entry.expires > Instant::now() {
+                return entry.ips.clone();
+            }
+        }
+    }
+
+    // Resolve via Google DoH with European ECS hint (85.214.0.0/16 — Germany)
+    // Uses /resolve for JSON API (Google's /dns-query requires DNS wire format)
+    let url = format!(
+        "https://dns.google/resolve?name={}&type=A&edns_client_subnet=85.214.0.0/16",
+        hostname
+    );
+
+    let ips = match resolve_doh(&url).await {
+        Ok(ips) => ips,
+        Err(e) => {
+            tracing::warn!("[DNS] European resolution failed for {hostname}: {e}");
+            // Fallback: try Cloudflare DoH without ECS
+            let fallback = format!("https://cloudflare-dns.com/dns-query?name={}&type=A", hostname);
+            resolve_doh(&fallback).await.unwrap_or_default()
+        }
+    };
+
+    if !ips.is_empty() {
+        let mut cache = DNS_CACHE.lock().unwrap();
+        cache.insert(hostname.to_string(), DnsEntry {
+            ips: ips.clone(),
+            expires: Instant::now() + Duration::from_secs(300),
+        });
+    }
+
+    ips
+}
+
+async fn resolve_doh(url: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error + Send + Sync>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let resp = client.get(url)
+        .header("Accept", "application/dns-json")
+        .send()
+        .await?;
+    let data: serde_json::Value = resp.json().await?;
+    let ips = data["Answer"].as_array()
+        .map(|answers| {
+            answers.iter()
+                .filter_map(|a| a["data"].as_str())
+                // parse::<IpAddr> rejects CNAME and other non-IP values
+                .filter_map(|s| s.parse::<IpAddr>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ips)
+}
+
 #[derive(Clone)]
 pub struct HlsState {
-    pub channels: Arc<Vec<ChannelState>>,
-    pub channel_map: Arc<HashMap<String, usize>>,
+    pub channels: Arc<RwLock<Vec<ChannelState>>>,
+    pub channel_map: Arc<RwLock<HashMap<String, usize>>>,
     pub filter: Arc<RwLock<FilterStore>>,
-    pub profile_id: i32,
     pub portal_client: Arc<RwLock<stalker::PortalClient>>,
+    pub profile_id: i32,
     pub token: String,
     pub serial_number: String,
     pub mac: String,
@@ -35,8 +112,8 @@ pub struct ChannelState {
 pub fn build_router(
     channels: Vec<stalker::Channel>,
     filter: Arc<RwLock<FilterStore>>,
-    profile_id: i32,
     portal_client: Arc<RwLock<stalker::PortalClient>>,
+    profile_id: i32,
     token: String,
     serial_number: String,
     mac: String,
@@ -50,11 +127,11 @@ pub fn build_router(
     }).collect();
 
     let state = HlsState {
-        channels: Arc::new(channel_states),
-        channel_map: Arc::new(channel_map),
+        channels: Arc::new(RwLock::new(channel_states)),
+        channel_map: Arc::new(RwLock::new(channel_map)),
         filter,
-        profile_id,
         portal_client,
+        profile_id,
         token,
         serial_number,
         mac,
@@ -77,7 +154,8 @@ async fn playlist_handler(
     let host = host_from_request(&req);
     let filter = st.filter.read().await;
     let mut output = String::from("#EXTM3U\n");
-    for ch in st.channels.iter() {
+    let channels = st.channels.read().await;
+    for ch in channels.iter() {
         if !filter.is_channel_allowed(st.profile_id, &ch.info.cmd, &ch.info.genre_id) { continue; }
         let title = filter.apply_rename(st.profile_id, &ch.info.title);
         let logo = format!("/logo/{}", url_encode(&title));
@@ -89,6 +167,7 @@ async fn playlist_handler(
             tvg_id, title, logo, genre, title, link
         ));
     }
+    drop(channels);
     drop(filter);
     Response::builder()
         .header("Content-Type", "audio/x-mpegurl; charset=utf-8")
@@ -106,22 +185,32 @@ async fn channel_handler(
     let title = url_decode(parts[0]);
     let suffix = parts.get(1).copied().unwrap_or("");
 
-    let idx = match st.channel_map.get(&title) {
-        Some(i) => *i,
+    // Lookup channel index by title
+    let idx = {
+        let map = st.channel_map.read().await;
+        map.get(&title).copied()
+    };
+    let idx = match idx {
+        Some(i) => i,
         None => {
-            // Try matching against renamed title
+            let channels = st.channels.read().await;
             let filter = st.filter.read().await;
-            let found = st.channels.iter().position(|c| {
+            match channels.iter().position(|c| {
                 filter.apply_rename(st.profile_id, &c.info.title) == title
-            });
-            if let Some(pos) = found { pos } else { return StatusCode::BAD_REQUEST.into_response(); }
+            }) {
+                Some(pos) => pos,
+                None => return StatusCode::BAD_REQUEST.into_response(),
+            }
         }
     };
-    let ch = &st.channels[idx];
 
-    let allowed = {
+    // Get stream info and check allowed
+    let (stream_url, cmd, allowed) = {
+        let channels = st.channels.read().await;
+        let ch = &channels[idx];
         let filter = st.filter.read().await;
-        filter.is_channel_allowed(st.profile_id, &ch.info.cmd, &ch.info.genre_id)
+        let allowed = filter.is_channel_allowed(st.profile_id, &ch.info.cmd, &ch.info.genre_id);
+        (ch.info.stream_url().to_string(), ch.info.cmd.clone(), allowed)
     };
     if !allowed {
         return StatusCode::FORBIDDEN.into_response();
@@ -130,24 +219,35 @@ async fn channel_handler(
     let scheme = scheme_from_request(&req);
     let host = host_from_request(&req);
 
-    // Get or create stream link via portal client
+    // Build target URL
     let target_url = if suffix.is_empty() {
-        let client = st.portal_client.write().await;
-        match client.create_link_with_retry(&ch.info.cmd, 3).await {
-            Ok(url) => url,
-            Err(e) => {
-                tracing::error!("Failed to create link for {}: {}", title, e);
-                return StatusCode::SERVICE_UNAVAILABLE.into_response();
-            }
-        }
+        stream_url
     } else {
-        // HLS segment or sub-request — reuse the base HLS root
-        // We need the base link. Check if suffix is a full URL path segment
-        format!("{}{}", get_hls_root(&st.portal_client, &ch.info.cmd).await, suffix)
+        format!("{}{}", get_hls_root_for_url(&stream_url), suffix)
     };
 
-    match proxy_request(&target_url, &scheme, &host, &title, &ch.info.cmd, !suffix.is_empty(), &st.token, &st.serial_number, &st.mac, &st.timezone, &st.model).await {
-        Ok(resp) => resp,
+    // Try the request
+    let result = proxy_request(
+        &target_url, &scheme, &host, &title, &cmd, !suffix.is_empty(),
+        &st.token, &st.serial_number, &st.mac, &st.timezone, &st.model,
+    ).await;
+
+    // On 458 (Cloudflare ban) for initial playlist, retry with fresh channel data
+    if suffix.is_empty() {
+        if let Ok(ref r) = result {
+            if r.status().as_u16() == 458 {
+                tracing::warn!("[HLS] got 458 for {}, refreshing channels...", &title);
+                return refresh_and_retry(&st, &title, &suffix, &scheme, &host).await
+                    .unwrap_or_else(|e| {
+                        tracing::error!("Retry failed for {}: {}", title, e);
+                        StatusCode::SERVICE_UNAVAILABLE.into_response()
+                    });
+            }
+        }
+    }
+
+    match result {
+        Ok(r) => r,
         Err(e) => {
             tracing::error!("Proxy failed for {title}: {e}");
             StatusCode::SERVICE_UNAVAILABLE.into_response()
@@ -155,20 +255,54 @@ async fn channel_handler(
     }
 }
 
-async fn get_hls_root(client: &Arc<RwLock<stalker::PortalClient>>, cmd: &str) -> String {
-    let c = client.write().await;
-    match c.create_link_with_retry(cmd, 3).await {
-        Ok(url) => {
-            if url.contains(".m3u8") {
-                match url.rfind('/') {
-                    Some(pos) => url[..=pos].to_string(),
-                    None => format!("{url}/"),
-                }
-            } else {
-                url
-            }
+/// Re-fetch channels from portal to get fresh play_tokens, update cache, and retry.
+async fn refresh_and_retry(
+    st: &HlsState, title: &str, suffix: &str, scheme: &str, host: &str,
+) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
+    let client = st.portal_client.write().await;
+    let fresh = client.get_channels().await?;
+
+    // Rebuild channel states
+    let mut new_map = HashMap::new();
+    let new_states: Vec<ChannelState> = fresh.into_iter().enumerate().map(|(i, ch)| {
+        new_map.insert(ch.title.clone(), i);
+        ChannelState { info: ch }
+    }).collect();
+
+    // Find matching channel in fresh data
+    let ni = new_map.get(title).copied().ok_or_else(|| {
+        format!("Channel '{}' not found after 458 refresh", title)
+    })?;
+
+    let new_url = new_states[ni].info.stream_url().to_string();
+    let new_cmd = new_states[ni].info.cmd.clone();
+
+    // Update cached channels so subsequent requests benefit too
+    *st.channels.write().await = new_states;
+    *st.channel_map.write().await = new_map;
+    drop(client);
+
+    let new_target = if suffix.is_empty() {
+        new_url
+    } else {
+        format!("{}{}", get_hls_root_for_url(&new_url), suffix)
+    };
+
+    tracing::info!("[HLS] retrying {} with fresh token", title);
+    proxy_request(
+        &new_target, scheme, host, title, &new_cmd, !suffix.is_empty(),
+        &st.token, &st.serial_number, &st.mac, &st.timezone, &st.model,
+    ).await
+}
+
+fn get_hls_root_for_url(url: &str) -> String {
+    if url.contains(".m3u8") {
+        match url.rfind('/') {
+            Some(pos) => url[..=pos].to_string(),
+            None => format!("{url}/"),
         }
-        Err(_) => String::new(),
+    } else {
+        url.to_string()
     }
 }
 
@@ -176,10 +310,22 @@ async fn proxy_request(
     url: &str, scheme: &str, host: &str, title: &str, _cmd: &str, is_suffix: bool,
     token: &str, serial_number: &str, mac: &str, timezone: &str, model: &str,
 ) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()?;
+    // Resolve stream hostname via European DNS to bypass geo-blocking
+    let parsed_url = url::Url::parse(url)?;
+    let stream_host = parsed_url.host_str().unwrap_or("").to_string();
+    let stream_port = parsed_url.port_or_known_default().unwrap_or(443);
+    let eur_ips = resolve_european(&stream_host).await;
 
+    let mut client_builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120));
+
+    // Pin only the first resolved IP (multiple resolve entries can cause hangs)
+    if !eur_ips.is_empty() {
+        tracing::info!("[HLS] European DNS for {}: {:?}", stream_host, eur_ips);
+        client_builder = client_builder.resolve(&stream_host, SocketAddr::new(eur_ips[0], stream_port));
+    }
+
+    let client = client_builder.build()?;
     let req = client.get(url);
     let req = crate::mag::apply_mag_headers(req, token, serial_number, mac, timezone, model);
     tracing::info!("[HLS] fetching upstream: {}", url);

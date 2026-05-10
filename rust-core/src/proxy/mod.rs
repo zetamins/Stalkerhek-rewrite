@@ -163,8 +163,7 @@ async fn proxy_handler(
                 // Serve from local cache (channels fetched at profile startup) to avoid
                 // relying on the portal's upstream get_all_channels endpoint which often
                 // returns 520. The STB JS uses this to populate stb.player.channels.
-                // Apply the same filter so stb.player.channels stays consistent
-                // with the filtered get_ordered_list results.
+                // Apply filter so stb.player.channels matches what the portal should show.
                 let filter = st.filter.read().await;
                 let data: Vec<serde_json::Value> = st.channels.values()
                     .filter(|ch| filter.is_channel_allowed(st.profile_id, &ch.cmd, &ch.genre_id))
@@ -389,7 +388,8 @@ async fn proxy_handler(
                 // Only rewrite if profile has actual filters — otherwise pass through unchanged
                 // to avoid JSON round-trip issues with the STB parser
                 if filter.has_filters(st.profile_id) {
-                    rewrite_channel_list_response(&body_bytes, body_preview_for, media_type, &filter, st.profile_id)
+                    let genre = query.extra.get("genre").map(String::as_str);
+                    rewrite_channel_list_response(&body_bytes, body_preview_for, media_type, &filter, st.profile_id, genre)
                         .map(Vec::from)
                         .unwrap_or_else(|| {
                             tracing::warn!("[PROXY] rewrite_channel_list_response returned None for action={} type={} — using original body", body_preview_for, media_type);
@@ -464,53 +464,24 @@ fn json_str<'a>(val: &'a serde_json::Value, buf: &'a mut String) -> &'a str {
 
 /// Intercept channel list responses from the portal and apply filtering/renaming.
 /// Handles `get_all_channels` (ITV) and `get_ordered_list` (ITV/VOD/Series).
+/// get_ordered_list passes through unfiltered — genre-level filtering is enforced
+/// by the genre list (hides disabled genres) and create_link (blocks playback).
 fn rewrite_channel_list_response(
     body: &[u8],
     action: &str,
     media_type: &str,
     filter: &FilterStore,
     profile_id: i32,
+    _genre: Option<&str>,
+
 ) -> Option<Vec<u8>> {
     let mut json: serde_json::Value = serde_json::from_slice(body).ok()?;
 
     match (action, media_type) {
         ("get_ordered_list", "itv" | "vod" | "series") => {
-            let genre_field = if media_type == "itv" { "tv_genre_id" } else { "category_id" };
-            let mut cmd_buf = String::new();
-            let mut genre_buf = String::new();
-            // Count items before filtering to detect actual removals
-            let (filtered_count, original_count) = {
-                let data = json["js"]["data"].as_array_mut()?;
-                let orig_len = data.len();
-                let filtered: Vec<serde_json::Value> = std::mem::take(data).into_iter().filter(|item| {
-                    let cmd = json_str(&item["cmd"], &mut cmd_buf);
-                    let genre_id = json_str(&item[genre_field], &mut genre_buf);
-                    filter.is_channel_allowed(profile_id, cmd, genre_id)
-                }).collect();
-                let count = filtered.len();
-                *data = filtered;
-                (count, orig_len)
-            };
-            // Only update total_items when items were actually removed, and preserve type.
-            // Adjust the original total (across all pages) by subtracting removed items
-            // from this page, rather than setting total_items to the page-local count.
-            if filtered_count < original_count {
-                let removed = original_count - filtered_count;
-                let old_total = json["js"]["total_items"].as_str()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .or_else(|| json["js"]["total_items"].as_u64());
-                if let Some(orig) = old_total {
-                    let adjusted = orig.saturating_sub(removed as u64);
-                    if json["js"]["total_items"].is_string() {
-                        json["js"]["total_items"] = serde_json::Value::String(adjusted.to_string());
-                    } else {
-                        json["js"]["total_items"] = serde_json::Value::Number(
-                            serde_json::Number::from(adjusted)
-                        );
-                    }
-                }
-            }
-            // Apply renames
+            // Don't filter channels from the list — the genre list hides disabled genres
+            // so users navigate to specific genres for filtered results, and create_link
+            // blocks playback for disabled channels. Just apply renames.
             if let Some(data) = json["js"]["data"].as_array_mut() {
                 for item in data.iter_mut() {
                     if let Some(name) = item["name"].as_str() {

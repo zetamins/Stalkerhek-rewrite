@@ -165,6 +165,24 @@ impl FilterStore {
         }
     }
 
+    /// Remove disabled genre IDs that no longer appear in the current channel data.
+    /// This prevents stale filter state from silently failing to filter when
+    /// the portal reassigns genre IDs between profile restarts.
+    /// Returns true if any entries were removed.
+    pub fn prune_stale_genres(&mut self, profile_id: i32, valid_genre_ids: &HashSet<String>) -> bool {
+        if let Some(disabled) = self.disabled_genres.get_mut(&profile_id) {
+            let before = disabled.len();
+            disabled.retain(|gid| valid_genre_ids.contains(gid));
+            let removed = before - disabled.len();
+            if removed > 0 {
+                tracing::info!("Pruned {} stale genre IDs for profile {}", removed, profile_id);
+                *self.versions.entry(profile_id).or_insert(0) += 1;
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn set_genre_rename(&mut self, profile_id: i32, genre_id: String, new_name: String) {
         if new_name.is_empty() {
             if let Some(map) = self.genre_renames.get_mut(&profile_id) {

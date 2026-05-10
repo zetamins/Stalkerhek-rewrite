@@ -11,6 +11,18 @@ pub struct Channel {
     pub cmd_ch_id: String,
 }
 
+impl Channel {
+    /// Extract the stream URL from the cmd field.
+    /// cmd format is typically "ffmpeg http://..." — this returns just the URL part.
+    pub fn stream_url(&self) -> &str {
+        if self.cmd.starts_with("ffmpeg ") {
+            &self.cmd[7..]
+        } else {
+            &self.cmd
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PortalClient {
     pub base_url: String,

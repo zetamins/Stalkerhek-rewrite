@@ -5,7 +5,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -14,14 +14,14 @@ use crate::hls;
 use crate::proxy;
 use crate::stalker;
 
-fn save_profiles(profiles: &[ProfileConfig]) {
+pub(crate) fn save_profiles(profiles: &[ProfileConfig], data_dir: &std::path::Path) {
     if let Ok(data) = serde_json::to_string_pretty(profiles) {
-        let _ = std::fs::create_dir_all("data");
-        let _ = std::fs::write("data/profiles.json", data);
+        let _ = std::fs::create_dir_all(data_dir);
+        let _ = std::fs::write(data_dir.join("profiles.json"), data);
     }
 }
 
-fn save_filters(filters: &crate::filter::FilterStore) {
+pub(crate) fn save_filters(filters: &crate::filter::FilterStore, data_dir: &std::path::Path) {
     use std::collections::HashSet;
     let all_ids: HashSet<i32> = filters.disabled_genres.keys()
         .chain(filters.disabled_channels.keys())
@@ -49,13 +49,13 @@ fn save_filters(filters: &crate::filter::FilterStore) {
         })
     }).collect();
     if let Ok(data) = serde_json::to_string_pretty(&snapshot) {
-        let _ = std::fs::create_dir_all("data");
-        let _ = std::fs::write("data/filters.json", data);
+        let _ = std::fs::create_dir_all(data_dir);
+        let _ = std::fs::write(data_dir.join("filters.json"), data);
     }
 }
 
-pub fn load_profiles() -> Vec<ProfileConfig> {
-    std::fs::read_to_string("data/profiles.json")
+pub fn load_profiles(data_dir: &std::path::Path) -> Vec<ProfileConfig> {
+    std::fs::read_to_string(data_dir.join("profiles.json"))
         .ok()
         .and_then(|data| serde_json::from_str(&data).ok())
         .unwrap_or_default()
@@ -148,7 +148,7 @@ async fn create_profile(
         proxy_rewrite: req.proxy_rewrite.unwrap_or(true),
     };
     profiles.push(cfg.clone());
-    save_profiles(&profiles);
+    save_profiles(&profiles, &st.data_dir);
     Ok(Json(cfg))
 }
 
@@ -180,7 +180,7 @@ async fn delete_profile(
             }
         }
         profiles.remove(pos);
-        save_profiles(&profiles);
+        save_profiles(&profiles, &st.data_dir);
         StatusCode::OK
     } else {
         StatusCode::NOT_FOUND
@@ -271,6 +271,32 @@ pub async fn start_profile_by_id(
     };
     tracing::info!("Profile {}: got {} vod categories, {} series categories", id, vod_categories.len(), series_categories.len());
 
+    // Prune stale genre IDs from filter state (genre IDs can change when the
+    // portal reassigns them between restarts, making filters silently ineffective).
+    // Collect IDs from ITV channels, VOD categories, and series categories.
+    {
+        let mut current_genre_ids: HashSet<String> = channels.iter()
+            .map(|ch| ch.genre_id.clone())
+            .filter(|id| !id.is_empty())
+            .collect();
+        for cat in &vod_categories {
+            if let Some(id) = cat["id"].as_str().filter(|s| !s.is_empty() && *s != "*") {
+                current_genre_ids.insert(id.to_string());
+            }
+        }
+        for cat in &series_categories {
+            if let Some(id) = cat["id"].as_str().filter(|s| !s.is_empty() && *s != "*") {
+                current_genre_ids.insert(id.to_string());
+            }
+        }
+        if !current_genre_ids.is_empty() {
+            let mut filters = st.filters.write().await;
+            if filters.prune_stale_genres(id, &current_genre_ids) {
+                save_filters(&filters, &st.data_dir);
+            }
+        }
+    }
+
     let filter = st.filters.clone();
     let profile_id = id;
     let hls_enabled = profile.hls_enabled;
@@ -299,7 +325,6 @@ pub async fn start_profile_by_id(
         let hls_bind = format!("0.0.0.0:{}", profile.hls_port);
         let hls_channels = channels.clone();
         let hls_filter = filter.clone();
-        let hls_client = portal_client.clone();
         let hls_token = {
             let c = portal_client.read().await;
             c.token.clone()
@@ -308,9 +333,10 @@ pub async fn start_profile_by_id(
         let hls_mac = profile.mac.clone();
         let hls_tz = profile.timezone.clone();
         let hls_model = profile.model.clone();
+        let hls_portal_client = portal_client.clone();
         tokio::spawn(async move {
             let app = hls::build_router(
-                hls_channels, hls_filter, profile_id, hls_client,
+                hls_channels, hls_filter, hls_portal_client, profile_id,
                 hls_token, hls_serial, hls_mac, hls_tz, hls_model,
             );
             let listener = match tokio::net::TcpListener::bind(&hls_bind).await {
@@ -539,7 +565,7 @@ async fn set_filters(
         }
         _ => return Err(StatusCode::BAD_REQUEST),
     }
-    save_filters(&filters);
+    save_filters(&filters, &st.data_dir);
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -549,7 +575,7 @@ async fn reset_filters(
 ) -> Json<serde_json::Value> {
     let mut filters = st.filters.write().await;
     filters.reset_profile(id);
-    save_filters(&filters);
+    save_filters(&filters, &st.data_dir);
     Json(serde_json::json!({"ok": true}))
 }
 
@@ -597,7 +623,7 @@ async fn sync_filters(
     {
         let mut filters = st.filters.write().await;
         filters.load_snapshot(snapshot);
-        save_filters(&filters);
+        save_filters(&filters, &st.data_dir);
     }
     tracing::info!("Filters synced from snapshot ({} profiles)", count);
     Json(serde_json::json!({"ok": true, "synced": count}))
