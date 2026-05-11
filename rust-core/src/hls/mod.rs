@@ -7,88 +7,14 @@ use axum::{
     Router,
 };
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use std::sync::Mutex;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
+use crate::dns;
 use crate::filter::FilterStore;
 use crate::stalker;
-
-/// Cached DNS resolver using European DNS upstreams, so CDN-backed
-/// stream hostnames resolve to European edge IPs and bypass geo-blocks.
-struct DnsEntry {
-    ips: Vec<IpAddr>,
-    expires: Instant,
-}
-
-static DNS_CACHE: std::sync::LazyLock<Mutex<HashMap<String, DnsEntry>>> = std::sync::LazyLock::new(|| {
-    Mutex::new(HashMap::new())
-});
-
-/// Resolve a hostname via Google DoH with an EDNS Client Subnet hint
-/// pointing to a European IP range. This causes the authoritative DNS
-/// to return European CDN/Cloudflare edge IPs.
-async fn resolve_european(hostname: &str) -> Vec<IpAddr> {
-    // Check cache first
-    {
-        let cache = DNS_CACHE.lock().unwrap();
-        if let Some(entry) = cache.get(hostname) {
-            if entry.expires > Instant::now() {
-                return entry.ips.clone();
-            }
-        }
-    }
-
-    // Resolve via Google DoH with European ECS hint (85.214.0.0/16 — Germany)
-    // Uses /resolve for JSON API (Google's /dns-query requires DNS wire format)
-    let url = format!(
-        "https://dns.google/resolve?name={}&type=A&edns_client_subnet=85.214.0.0/16",
-        hostname
-    );
-
-    let ips = match resolve_doh(&url).await {
-        Ok(ips) => ips,
-        Err(e) => {
-            tracing::warn!("[DNS] European resolution failed for {hostname}: {e}");
-            // Fallback: try Cloudflare DoH without ECS
-            let fallback = format!("https://cloudflare-dns.com/dns-query?name={}&type=A", hostname);
-            resolve_doh(&fallback).await.unwrap_or_default()
-        }
-    };
-
-    if !ips.is_empty() {
-        let mut cache = DNS_CACHE.lock().unwrap();
-        cache.insert(hostname.to_string(), DnsEntry {
-            ips: ips.clone(),
-            expires: Instant::now() + Duration::from_secs(300),
-        });
-    }
-
-    ips
-}
-
-async fn resolve_doh(url: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()?;
-    let resp = client.get(url)
-        .header("Accept", "application/dns-json")
-        .send()
-        .await?;
-    let data: serde_json::Value = resp.json().await?;
-    let ips = data["Answer"].as_array()
-        .map(|answers| {
-            answers.iter()
-                .filter_map(|a| a["data"].as_str())
-                // parse::<IpAddr> rejects CNAME and other non-IP values
-                .filter_map(|s| s.parse::<IpAddr>().ok())
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(ips)
-}
 
 #[derive(Clone)]
 pub struct HlsState {
@@ -141,6 +67,7 @@ pub fn build_router(
 
     Router::new()
         .route("/", get(playlist_handler))
+        .route("/epg", get(epg_handler))
         .route("/*path", get(channel_handler))
         .with_state(state)
 }
@@ -153,7 +80,8 @@ async fn playlist_handler(
     let scheme = scheme_from_request(&req);
     let host = host_from_request(&req);
     let filter = st.filter.read().await;
-    let mut output = String::from("#EXTM3U\n");
+    let epg_url = format!("{}://{}/epg", scheme, host);
+    let mut output = format!("#EXTM3U x-tvg-url=\"{}\"\n", epg_url);
     let channels = st.channels.read().await;
     for ch in channels.iter() {
         if !filter.is_channel_allowed(st.profile_id, &ch.info.cmd, &ch.info.genre_id) { continue; }
@@ -255,6 +183,84 @@ async fn channel_handler(
     }
 }
 
+async fn epg_handler(
+    State(st): State<HlsState>,
+) -> Response {
+    tracing::info!("[HLS] EPG requested");
+    let portal_url = {
+        let client = st.portal_client.read().await;
+        client.base_url.clone()
+    };
+    let epg_url = format!("{}?type=itv&action=get_epg_info&period=5&JsHttpRequest=1-xml", portal_url);
+
+    let parsed = match url::Url::parse(&epg_url) {
+        Ok(u) => u,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    let host = parsed.host_str().unwrap_or("").to_string();
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let eur_ips = dns::resolve_european(&host).await;
+
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .redirect(reqwest::redirect::Policy::none());
+    if !eur_ips.is_empty() {
+        builder = builder.resolve(&host, SocketAddr::new(eur_ips[0], port));
+    }
+    let client = match builder.build() {
+        Ok(c) => c,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+
+    let mut req = client.get(&epg_url);
+    req = crate::mag::apply_mag_headers(
+        req, &st.token, &st.serial_number, &st.mac, &st.timezone, &st.model,
+    );
+
+    // Use the profile's configured timezone for EPG timeshift metadata.
+    // This is set by the user's browser/device timezone when creating the profile.
+    let tz = st.timezone.clone();
+    tracing::info!("[HLS] EPG timezone: {}", tz);
+
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let bytes = resp.bytes().await.unwrap_or_default();
+            let body = if status.is_success() {
+                // Inject timezone into EPG JSON for IPTV player timeshift support
+                match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    Ok(mut json) => {
+                        json["timezone"] = serde_json::Value::String(tz);
+                        serde_json::to_vec(&json).unwrap_or_else(|_| bytes.to_vec())
+                    }
+                    Err(_) => bytes.to_vec(),
+                }
+            } else {
+                bytes.to_vec()
+            };
+            let mut response = Response::builder().status(status);
+            for (key, val) in headers.iter() {
+                let ks = key.as_str().to_lowercase();
+                match ks.as_str() {
+                    "host" | "connection" | "transfer-encoding" | "keep-alive"
+                    | "te" | "trailer" | "upgrade" | "content-length"
+                    | "content-encoding" => continue,
+                    _ => { response = response.header(key, val); }
+                }
+            }
+            response
+                .header("Access-Control-Allow-Origin", "*")
+                .body(Body::from(body))
+                .unwrap()
+        }
+        Err(e) => {
+            tracing::error!("[HLS] EPG fetch failed: {e}");
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+    }
+}
+
 /// Re-fetch channels from portal to get fresh play_tokens, update cache, and retry.
 async fn refresh_and_retry(
     st: &HlsState, title: &str, suffix: &str, scheme: &str, host: &str,
@@ -314,10 +320,10 @@ async fn proxy_request(
     let parsed_url = url::Url::parse(url)?;
     let stream_host = parsed_url.host_str().unwrap_or("").to_string();
     let stream_port = parsed_url.port_or_known_default().unwrap_or(443);
-    let eur_ips = resolve_european(&stream_host).await;
+    let eur_ips = dns::resolve_european(&stream_host).await;
 
     let mut client_builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(300))
         // Disable auto-redirect — we follow manually to preserve all
         // headers (Authorization, Cookie) across cross-origin hops,
         // since reqwest strips Authorization on cross-origin redirects.

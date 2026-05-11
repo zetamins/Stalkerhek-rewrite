@@ -219,7 +219,7 @@ pub async fn start_profile_by_id(
         }
     }
 
-    // Build portal client and authenticate
+    // Build portal client with European DNS resolution and authenticate
     let portal_client = Arc::new(RwLock::new(
         stalker::PortalClient::new(
             profile.portal_url.clone(),
@@ -235,6 +235,12 @@ pub async fn start_profile_by_id(
             profile.device_id_auth,
         )
     ));
+
+    // Resolve portal via European DNS to bypass geo-blocking
+    {
+        let mut client = portal_client.write().await;
+        client.resolve_eu_dns().await;
+    }
 
     // Authenticate
     {
@@ -373,6 +379,7 @@ pub async fn start_profile_by_id(
         let profile_cfg = profile.clone();
         let proxy_vod_cats = vod_categories.clone();
         let proxy_series_cats = series_categories.clone();
+        let proxy_portal_client = portal_client.clone();
 
         tokio::spawn(async move {
             let app = proxy::build_router(
@@ -390,6 +397,7 @@ pub async fn start_profile_by_id(
                 format!("0.0.0.0:{}", hls_port),
                 proxy_vod_cats,
                 proxy_series_cats,
+                proxy_portal_client,
             );
             let listener = match tokio::net::TcpListener::bind(&proxy_bind).await {
                 Ok(l) => l,

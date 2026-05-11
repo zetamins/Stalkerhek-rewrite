@@ -4,6 +4,7 @@ pub mod proxy;
 pub mod filter;
 pub mod api;
 pub mod mag;
+pub mod dns;
 
 #[cfg(feature = "android")]
 pub mod jni_bridge;

@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
+
+use crate::dns;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
@@ -59,6 +62,29 @@ impl PortalClient {
             base_url, mac, username, password, serial_number, device_id,
             device_id2, signature, model, timezone, device_id_auth,
             token: String::new(), client,
+        }
+    }
+
+    /// Rebuild the internal client with European DNS resolution for the portal hostname.
+    /// Call this after construction to bypass geo-blocking on portal requests.
+    pub async fn resolve_eu_dns(&mut self) {
+        let parsed = match url::Url::parse(&self.base_url) {
+            Ok(u) => u,
+            Err(_) => return,
+        };
+        let host = parsed.host_str().unwrap_or("").to_string();
+        let port = parsed.port_or_known_default().unwrap_or(443);
+        let ips = dns::resolve_european(&host).await;
+
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .user_agent("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 4 rev: 2116 Mobile Safari/533.3")
+            .danger_accept_invalid_certs(false);
+        if !ips.is_empty() {
+            builder = builder.resolve(&host, SocketAddr::new(ips[0], port));
+        }
+        if let Ok(client) = builder.build() {
+            self.client = client;
         }
     }
 

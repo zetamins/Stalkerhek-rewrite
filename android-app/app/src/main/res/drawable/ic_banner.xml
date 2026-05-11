@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <!-- Background -->
+    <path
+        android:fillColor="#080C09"
+        android:pathData="M0,0h320v180H0z" />
+    <!-- Shield logo -->
+    <path
+        android:fillColor="#2D8A4E"
+        android:pathData="M30,30L30,90c0,20 12.5,38.7 30,50c17.5,-11.3 30,-30 30,-50V30L60,18L30,30z" />
+    <!-- Play triangle -->
+    <path
+        android:fillColor="#080C09"
+        android:pathData="M46,48v34l24,-17z" />
+    <!-- Text: Stalkerhek -->
+    <path
+        android:fillColor="#E2ECE3"
+        android:pathData="M90,65h160q4,0 4,4v42q0,4 -4,4H90q-4,0 -4,-4V69q0,-4 4,-4z" />
+    <path
+        android:fillColor="#2D8A4E"
+        android:pathData="M92,67h156v38H92z" />
+    <path
+        android:fillColor="#E2ECE3"
+        android:pathData="M100,80h20q2,0 2,2v16q0,2 -2,2h-20q-2,0 -2,-2V82q0,-2 2,-2z" />
+</vector>

@@ -8,9 +8,14 @@ use axum::{
 };
 use serde_json;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
+use url::Url;
+
+use crate::dns;
 use crate::filter::FilterStore;
 use crate::stalker;
 
@@ -32,6 +37,7 @@ pub struct ProxyState {
     pub hls_bind: String,
     pub vod_categories: Vec<serde_json::Value>,
     pub series_categories: Vec<serde_json::Value>,
+    pub portal_client: Arc<RwLock<stalker::PortalClient>>,
 }
 
 pub fn build_router(
@@ -49,6 +55,7 @@ pub fn build_router(
     hls_bind: String,
     vod_categories: Vec<serde_json::Value>,
     series_categories: Vec<serde_json::Value>,
+    portal_client: Arc<RwLock<stalker::PortalClient>>,
 ) -> Router {
     let mut channel_map = HashMap::new();
     for ch in &channels {
@@ -86,6 +93,7 @@ pub fn build_router(
         hls_bind,
         vod_categories,
         series_categories,
+        portal_client,
     };
 
     Router::new()
@@ -332,17 +340,209 @@ async fn proxy_handler(
         format!("{}?{}", st.portal_base, qs.join("&"))
     };
 
-    // Build a per-request client (no cookie jar, so we control the Cookie header explicitly).
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .unwrap();
+    // Use European DNS resolution and manual redirect following to bypass
+    // geo-blocks and preserve all headers across cross-origin redirect hops.
+    let parsed_url = match Url::parse(&final_url) {
+        Ok(u) => u,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    let stream_host = parsed_url.host_str().unwrap_or("").to_string();
+    let stream_port = parsed_url.port_or_known_default().unwrap_or(443);
+    let eur_ips = dns::resolve_european(&stream_host).await;
 
-    let mut proxy_req = client.get(&final_url);
+    let mut client_builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .redirect(reqwest::redirect::Policy::none());
 
-    // Forward client headers (matching original Go proxy behaviour).
-    // The Go proxy iterates over all client headers and forwards them EXCEPT:
-    // Cookie, Authorization, Referer/Referrer (which it overrides), and hop-by-hop headers.
+    if !eur_ips.is_empty() {
+        tracing::info!("[PROXY] European DNS for {}: {:?}", stream_host, eur_ips);
+        client_builder = client_builder.resolve(&stream_host, SocketAddr::new(eur_ips[0], stream_port));
+    }
+
+    let client = match client_builder.build() {
+        Ok(c) => c,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+
+    // Manual redirect loop — preserve all headers (Authorization, Cookie) on every hop
+    let mut current_url = final_url;
+    let max_redirects = 200;
+    let mut response = None;
+    let mut is_458 = false;
+
+    for hop in 0..=max_redirects {
+        let mut proxy_req = client.get(&current_url);
+
+        // Forward client headers (same filtering as before)
+        for (key, val) in headers.iter() {
+            let ks = key.as_str().to_lowercase();
+            match ks.as_str() {
+                "host" | "cookie" | "authorization" | "referer" | "referrer" | "origin"
+                | "connection" | "transfer-encoding" | "keep-alive"
+                | "te" | "trailer" | "upgrade" | "proxy-authorization"
+                | "proxy-authenticate" | "content-length" | "content-type"
+                | "accept-encoding" | "content-encoding" => continue,
+                _ => { proxy_req = proxy_req.header(key, val); }
+            }
+        }
+
+        // Apply MAG headers
+        proxy_req = crate::mag::apply_mag_headers(
+            proxy_req, &st.token, &st.serial_number, &st.mac, &st.timezone, "MAG254",
+        );
+
+        let referer_host = match current_url.splitn(2, "://").nth(1).and_then(|r| r.split('/').next()) {
+            Some(h) => format!("{}://{}/", if current_url.starts_with("https") { "https" } else { "http" }, h),
+            None => format!("{}/", st.portal_base.trim_end_matches('/')),
+        };
+        proxy_req = proxy_req
+            .header("Referer", &referer_host)
+            .header("Origin", referer_host.trim_end_matches('/'));
+
+        tracing::info!("[PROXY] -> upstream {} (hop {})", &current_url, hop);
+
+        match proxy_req.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                is_458 = status.as_u16() == 458;
+
+                if status.is_redirection() && hop < max_redirects {
+                    if let Some(location) = resp.headers().get(reqwest::header::LOCATION) {
+                        let dest = match location.to_str() {
+                            Ok(d) => d.to_string(),
+                            Err(_) => break,
+                        };
+                        current_url = if dest.starts_with("http://") || dest.starts_with("https://") {
+                            dest
+                        } else {
+                            Url::parse(&current_url)
+                                .ok()
+                                .and_then(|u| u.join(&dest).ok().map(|u| u.to_string()))
+                                .unwrap_or(dest)
+                        };
+                        tracing::info!("[PROXY] redirect {}: {} -> {}", hop + 1, status.as_u16(), current_url);
+                        continue;
+                    }
+                }
+
+                response = Some((status, resp));
+                break;
+            }
+            Err(e) => {
+                tracing::error!("Proxy upstream error at hop {hop}: {e}");
+                return StatusCode::BAD_GATEWAY.into_response();
+            }
+        }
+    }
+
+    // Handle 458 (Cloudflare ban) — refresh channels and retry for create_link
+    if is_458 && query.action.as_deref() == Some("create_link") {
+        tracing::warn!("[PROXY] got 458 for create_link, refreshing channels...");
+        match proxy_refresh_and_retry(&st, &query, &headers, &current_url, &client).await {
+            Ok(r) => return r,
+            Err(e) => {
+                tracing::error!("Proxy 458 retry failed: {e}");
+            }
+        }
+    }
+
+    let (status, resp) = match response {
+        Some(r) => r,
+        None => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    let resp_headers = resp.headers().clone();
+    let body_bytes = resp.bytes().await.unwrap_or_default();
+    let body_preview_for = query.action.as_deref().unwrap_or("");
+    let media_type = query.r#type.as_deref().unwrap_or("");
+    tracing::info!("[PROXY] <- status={} bytes={} action={} type={}", status.as_u16(), body_bytes.len(), body_preview_for, media_type);
+
+    // Override response status for error cases where we substitute the body
+    let mut response_status = status;
+    // Apply channel filtering and renaming to channel list responses
+    let final_body = if status.is_success() {
+        let filter = st.filter.read().await;
+        if filter.has_filters(st.profile_id) {
+            let genre = query.extra.get("genre").map(String::as_str);
+            rewrite_channel_list_response(&body_bytes, body_preview_for, media_type, &filter, st.profile_id, genre)
+                .map(Vec::from)
+                .unwrap_or_else(|| {
+                    tracing::warn!("[PROXY] rewrite_channel_list_response returned None for action={} type={} — using original body", body_preview_for, media_type);
+                    body_bytes.to_vec()
+                })
+        } else {
+            tracing::trace!("[PROXY] no filters for profile {}, passing through", st.profile_id);
+            body_bytes.to_vec()
+        }
+    } else {
+        match (body_preview_for, media_type) {
+            ("get_ordered_list", "itv" | "vod" | "series") => {
+                response_status = StatusCode::OK;
+                serde_json::to_vec(&serde_json::json!({"js": {"total_items": 0, "max_page_items": 14, "selected_item": 0, "cur_page": 1, "data": []}}))
+                    .unwrap_or_else(|_| body_bytes.to_vec())
+            }
+            ("get_genres", "itv") => {
+                serde_json::to_vec(&serde_json::json!({"js": []}))
+                    .unwrap_or_else(|_| body_bytes.to_vec())
+            }
+            _ => body_bytes.to_vec(),
+        }
+    };
+    if body_preview_for == "get_ordered_list" || body_preview_for == "set_fav_status" {
+        tracing::info!("[PROXY] final_body size={} for action={}", final_body.len(), body_preview_for);
+    }
+    if body_preview_for == "get_ordered_list" {
+        tracing::info!("[PROXY] upstream Content-Type: {:?}", resp_headers.get("content-type"));
+    }
+    let mut response = Response::builder().status(response_status);
+    for (key, val) in resp_headers.iter() {
+        let key_str = key.as_str().to_lowercase();
+        match key_str.as_str() {
+            "host" | "connection" | "transfer-encoding" | "keep-alive"
+            | "te" | "trailer" | "upgrade" | "proxy-authorization"
+            | "proxy-authenticate" | "content-length" | "content-encoding" => continue,
+            _ => { response = response.header(key, val); }
+        }
+    }
+    response.body(Body::from(final_body.to_vec())).unwrap()
+}
+
+fn generate_create_link_response(stream_url: &str, id: &str, ch_id: &str) -> String {
+    let escaped = stream_url.replace('/', "\\/");
+    format!(
+        r#"{{"js":{{"id":"{}","cmd":"{}","streamer_id":0,"link_id":{},"load":0,"error":""}},"text":""}}"#,
+        id, escaped, ch_id
+    )
+}
+
+/// Retry a create_link request after re-fetching channels to get a fresh play_token.
+/// Called when the portal returned 458 (Cloudflare ban / stale token).
+async fn proxy_refresh_and_retry(
+    st: &ProxyState, query: &ProxyQuery, headers: &HeaderMap, _original_url: &str, client: &reqwest::Client,
+) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
+    // Re-fetch channels to get fresh play_tokens
+    let client_lock = st.portal_client.write().await;
+    let fresh = client_lock.get_channels().await?;
+
+    // Find matching channel cmd in fresh data
+    let cmd = query.cmd.as_deref().unwrap_or("");
+    let fresh_cmd = fresh.iter()
+        .find(|ch| ch.cmd == cmd || ch.title == cmd)
+        .map(|ch| ch.cmd.clone())
+        .unwrap_or_else(|| cmd.to_string());
+
+    // Build fresh create_link URL
+    let encoded_cmd: String = fresh_cmd.split_whitespace()
+        .map(|s| url_encode(s))
+        .collect::<Vec<_>>()
+        .join("%20");
+    let fresh_url = format!(
+        "{}?action=create_link&type=itv&cmd={}&JsHttpRequest=1-xml",
+        st.portal_base, encoded_cmd
+    );
+
+    tracing::info!("[PROXY] 458 retry with fresh token: {}", fresh_url);
+
+    let mut proxy_req = client.get(&fresh_url);
     for (key, val) in headers.iter() {
         let ks = key.as_str().to_lowercase();
         match ks.as_str() {
@@ -354,100 +554,29 @@ async fn proxy_handler(
             _ => { proxy_req = proxy_req.header(key, val); }
         }
     }
-
-    // Apply MAG headers last so they override anything forwarded above
-    // (Cookie: PHPSESSID=null, Bearer token, User-Agent, etc.)
     proxy_req = crate::mag::apply_mag_headers(
         proxy_req, &st.token, &st.serial_number, &st.mac, &st.timezone, "MAG254",
     );
-    // Set Referer/Origin to scheme://host/ (original Go proxy does this for every upstream request)
-    let referer_host = match final_url.splitn(2, "://").nth(1).and_then(|r| r.split('/').next()) {
-        Some(h) => format!("{}://{}/", match &final_url[..] { s if s.starts_with("https") => "https", _ => "http" }, h),
-        None => format!("{}/", st.portal_base.trim_end_matches('/')),
-    };
-    let proxy_req = proxy_req
-        .header("Referer", &referer_host)
-        .header("Origin", referer_host.trim_end_matches('/'));
+    let referer_host = st.portal_base.trim_end_matches('/');
+    proxy_req = proxy_req.header("Referer", format!("{}/", referer_host))
+        .header("Origin", referer_host);
 
-    tracing::info!("[PROXY] -> upstream {} (Referer: {})", &final_url, referer_host.trim_end_matches('/'));
+    let resp = proxy_req.send().await?;
+    let status = resp.status();
+    let resp_headers = resp.headers().clone();
+    let body_bytes = resp.bytes().await.unwrap_or_default();
 
-    match proxy_req.send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            let headers = resp.headers().clone();
-            let body_bytes = resp.bytes().await.unwrap_or_default();
-            let body_preview_for = query.action.as_deref().unwrap_or("");
-            let media_type = query.r#type.as_deref().unwrap_or("");
-            tracing::info!("[PROXY] <- status={} bytes={} action={} type={}", status.as_u16(), body_bytes.len(), body_preview_for, media_type);
-
-            // Override response status for error cases where we substitute the body
-            let mut response_status = status;
-            // Apply channel filtering and renaming to channel list responses
-            let final_body = if status.is_success() {
-                let filter = st.filter.read().await;
-                // Only rewrite if profile has actual filters — otherwise pass through unchanged
-                // to avoid JSON round-trip issues with the STB parser
-                if filter.has_filters(st.profile_id) {
-                    let genre = query.extra.get("genre").map(String::as_str);
-                    rewrite_channel_list_response(&body_bytes, body_preview_for, media_type, &filter, st.profile_id, genre)
-                        .map(Vec::from)
-                        .unwrap_or_else(|| {
-                            tracing::warn!("[PROXY] rewrite_channel_list_response returned None for action={} type={} — using original body", body_preview_for, media_type);
-                            body_bytes.to_vec()
-                        })
-                } else {
-                    tracing::trace!("[PROXY] no filters for profile {}, passing through", st.profile_id);
-                    body_bytes.to_vec()
-                }
-            } else {
-                // For channel list endpoints, return valid empty JSON on upstream errors
-                // so the STB doesn't break on 5xx responses from the portal
-                match (body_preview_for, media_type) {
-                    ("get_ordered_list", "itv" | "vod" | "series") => {
-                        response_status = StatusCode::OK;
-                        serde_json::to_vec(&serde_json::json!({"js": {"total_items": 0, "max_page_items": 14, "selected_item": 0, "cur_page": 1, "data": []}}))
-                            .unwrap_or_else(|_| body_bytes.to_vec())
-                    }
-                    ("get_genres", "itv") => {
-                        serde_json::to_vec(&serde_json::json!({"js": []}))
-                            .unwrap_or_else(|_| body_bytes.to_vec())
-                    }
-                    _ => body_bytes.to_vec(),
-                }
-            };
-            // Log the final response size after rewrite for debugging
-            if body_preview_for == "get_ordered_list" || body_preview_for == "set_fav_status" {
-                tracing::info!("[PROXY] final_body size={} for action={}", final_body.len(), body_preview_for);
-            }
-            if body_preview_for == "get_ordered_list" {
-                tracing::info!("[PROXY] upstream Content-Type: {:?}", headers.get("content-type"));
-            }
-            let mut response = Response::builder().status(response_status);
-            // Forward all upstream headers, overriding none
-            for (key, val) in headers.iter() {
-                let key_str = key.as_str().to_lowercase();
-                match key_str.as_str() {
-                    "host" | "connection" | "transfer-encoding" | "keep-alive"
-                    | "te" | "trailer" | "upgrade" | "proxy-authorization"
-                    | "proxy-authenticate" | "content-length" | "content-encoding" => continue,
-                    _ => { response = response.header(key, val); }
-                }
-            }
-            response.body(Body::from(final_body.to_vec())).unwrap()
-        }
-        Err(e) => {
-            tracing::error!("Proxy upstream error: {e}");
-            StatusCode::BAD_GATEWAY.into_response()
+    let mut response = Response::builder().status(status);
+    for (key, val) in resp_headers.iter() {
+        let key_str = key.as_str().to_lowercase();
+        match key_str.as_str() {
+            "host" | "connection" | "transfer-encoding" | "keep-alive"
+            | "te" | "trailer" | "upgrade" | "proxy-authorization"
+            | "proxy-authenticate" | "content-length" | "content-encoding" => continue,
+            _ => { response = response.header(key, val); }
         }
     }
-}
-
-fn generate_create_link_response(stream_url: &str, id: &str, ch_id: &str) -> String {
-    let escaped = stream_url.replace('/', "\\/");
-    format!(
-        r#"{{"js":{{"id":"{}","cmd":"{}","streamer_id":0,"link_id":{},"load":0,"error":""}},"text":""}}"#,
-        id, escaped, ch_id
-    )
+    Ok(response.body(Body::from(body_bytes.to_vec())).unwrap())
 }
 
 /// Extract a string value from a JSON value that may be a string or number.

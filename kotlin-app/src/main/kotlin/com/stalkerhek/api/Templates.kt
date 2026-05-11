@@ -594,6 +594,13 @@ if (document.querySelectorAll('.profile-card').length > 0) {
 
 var macRe = /^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/;
 
+// Auto-detect browser timezone and set it in the profile form
+var userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+if (userTimezone) {
+  document.getElementById('timezone').value = userTimezone;
+  document.getElementById('qe_timezone').value = userTimezone;
+}
+
 function normalizePortal(raw) {
   var s = (raw || '').trim();
   if (!s) return '';
@@ -645,6 +652,9 @@ function copyLink(e, el) {
 }
 
 document.getElementById('addForm').addEventListener('submit', function (e) {
+  // Ensure timezone is always set to current browser timezone
+  var detectedTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (detectedTz) document.getElementById('timezone').value = detectedTz;
   var v = normalizePortal(document.getElementById('portal').value || '');
   document.getElementById('portal').value = v;
   var m = (document.getElementById('mac').value || '').trim().toUpperCase();
@@ -717,7 +727,11 @@ document.getElementById('profiles').addEventListener('click', function (e) {
 });
 document.getElementById('qeCancel').addEventListener('click', function () { qeModal.classList.remove('open'); });
 qeModal.addEventListener('click', function (e) { if (e.target === qeModal) qeModal.classList.remove('open'); });
-document.getElementById('qeForm').addEventListener('submit', function () { qeModal.classList.remove('open'); });
+document.getElementById('qeForm').addEventListener('submit', function () {
+  var detectedTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (detectedTz) document.getElementById('qe_timezone').value = detectedTz;
+  qeModal.classList.remove('open');
+});
 
 document.getElementById('saveSettings').addEventListener('click', async function () {
   try {
