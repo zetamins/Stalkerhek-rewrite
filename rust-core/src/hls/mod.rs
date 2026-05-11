@@ -317,7 +317,11 @@ async fn proxy_request(
     let eur_ips = resolve_european(&stream_host).await;
 
     let mut client_builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120));
+        .timeout(std::time::Duration::from_secs(120))
+        // Disable auto-redirect — we follow manually to preserve all
+        // headers (Authorization, Cookie) across cross-origin hops,
+        // since reqwest strips Authorization on cross-origin redirects.
+        .redirect(reqwest::redirect::Policy::none());
 
     // Pin only the first resolved IP (multiple resolve entries can cause hangs)
     if !eur_ips.is_empty() {
@@ -326,56 +330,83 @@ async fn proxy_request(
     }
 
     let client = client_builder.build()?;
-    let req = client.get(url);
-    let req = crate::mag::apply_mag_headers(req, token, serial_number, mac, timezone, model);
-    tracing::info!("[HLS] fetching upstream: {}", url);
-    let resp = req.send().await?;
 
-    let status = resp.status();
-    let upstream_headers = resp.headers().clone();
-    let content_type = upstream_headers.get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
+    // Follow redirect chain manually, preserving all headers on every hop.
+    // Stream URLs often redirect through CDN/storage server chains and
+    // dropping Authorization or Cookie on any hop causes a 444/458 block.
+    let mut current_url = url.to_string();
+    let max_redirects = 20;
+    for hop in 0..=max_redirects {
+        let req = client.get(&current_url);
+        let req = crate::mag::apply_mag_headers(req, token, serial_number, mac, timezone, model);
+        tracing::info!("[HLS] fetch (hop {}/{max_redirects}): {}", hop, current_url);
+        let resp = req.send().await?;
+        let status = resp.status();
 
-    let ct_lower = content_type.to_lowercase();
-    let is_m3u8 = ct_lower.contains("mpegurl") || ct_lower.contains("x-mpegurl");
-
-    let bytes = resp.bytes().await?;
-
-    if is_m3u8 {
-        let body_str = String::from_utf8_lossy(&bytes);
-        let rewritten = rewrite_m3u8(&body_str, scheme, host, title);
-        let mut response = Response::builder()
-            .status(status)
-            .header("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8")
-            .body(Body::from(rewritten))
-            .unwrap();
-        response.headers_mut().insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-        Ok(response)
-    } else {
-        let mut response = Response::builder()
-            .status(status)
-            .header("Content-Type", &content_type)
-            .body(Body::from(bytes.to_vec()))
-            .unwrap();
-        // Forward upstream headers except hop-by-hop
-        for (key, val) in upstream_headers.iter() {
-            let ks = key.as_str().to_lowercase();
-            match ks.as_str() {
-                "host" | "connection" | "transfer-encoding" | "keep-alive"
-                | "te" | "trailer" | "upgrade" | "proxy-authorization"
-                | "proxy-authenticate" | "content-type" | "content-length"
-                | "content-encoding" | "access-control-allow-origin" => continue,
-                _ => { response.headers_mut().insert(key, val.clone()); }
+        // Follow redirect
+        if status.is_redirection() && hop < max_redirects {
+            if let Some(location) = resp.headers().get(reqwest::header::LOCATION) {
+                let dest = location.to_str()?.to_string();
+                current_url = if dest.starts_with("http://") || dest.starts_with("https://") {
+                    dest
+                } else {
+                    url::Url::parse(&current_url)?
+                        .join(&dest)
+                        .map(|u| u.to_string())
+                        .unwrap_or(dest)
+                };
+                tracing::info!("[HLS] redirect {}: {} -> {}", hop + 1, status.as_u16(), current_url);
+                continue;
             }
         }
-        response.headers_mut().insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-        if !is_suffix {
-            response.headers_mut().insert("Content-Length", bytes.len().into());
+
+        let upstream_headers = resp.headers().clone();
+        let content_type = upstream_headers.get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        let ct_lower = content_type.to_lowercase();
+        let is_m3u8 = ct_lower.contains("mpegurl") || ct_lower.contains("x-mpegurl");
+
+        let bytes = resp.bytes().await?;
+
+        if is_m3u8 {
+            let body_str = String::from_utf8_lossy(&bytes);
+            let rewritten = rewrite_m3u8(&body_str, scheme, host, title);
+            let mut response = Response::builder()
+                .status(status)
+                .header("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8")
+                .body(Body::from(rewritten))
+                .unwrap();
+            response.headers_mut().insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+            return Ok(response);
+        } else {
+            let mut response = Response::builder()
+                .status(status)
+                .header("Content-Type", &content_type)
+                .body(Body::from(bytes.to_vec()))
+                .unwrap();
+            // Forward upstream headers except hop-by-hop
+            for (key, val) in upstream_headers.iter() {
+                let ks = key.as_str().to_lowercase();
+                match ks.as_str() {
+                    "host" | "connection" | "transfer-encoding" | "keep-alive"
+                    | "te" | "trailer" | "upgrade" | "proxy-authorization"
+                    | "proxy-authenticate" | "content-type" | "content-length"
+                    | "content-encoding" | "access-control-allow-origin" => continue,
+                    _ => { response.headers_mut().insert(key, val.clone()); }
+                }
+            }
+            response.headers_mut().insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+            if !is_suffix {
+                response.headers_mut().insert("Content-Length", bytes.len().into());
+            }
+            return Ok(response);
         }
-        Ok(response)
     }
+
+    Err("Too many redirects".into())
 }
 
 fn rewrite_m3u8(content: &str, scheme: &str, host: &str, title: &str) -> String {
