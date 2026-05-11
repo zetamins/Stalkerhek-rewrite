@@ -335,11 +335,11 @@ async fn proxy_request(
     // Stream URLs often redirect through CDN/storage server chains and
     // dropping Authorization or Cookie on any hop causes a 444/458 block.
     let mut current_url = url.to_string();
-    let max_redirects = 20;
+    let max_redirects = 200;
     for hop in 0..=max_redirects {
         let req = client.get(&current_url);
         let req = crate::mag::apply_mag_headers(req, token, serial_number, mac, timezone, model);
-        tracing::info!("[HLS] fetch (hop {}/{max_redirects}): {}", hop, current_url);
+        tracing::info!("[HLS] fetch (hop {}/{}): {}", hop, max_redirects, current_url);
         let resp = req.send().await?;
         let status = resp.status();
 
