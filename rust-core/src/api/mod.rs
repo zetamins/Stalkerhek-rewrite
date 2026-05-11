@@ -415,6 +415,7 @@ pub async fn start_profile_by_id(
     }
 
     let status = Arc::new(RwLock::new(ProfileStatus {
+        id: profile.id,
         phase: "success".to_string(),
         message: "Running".to_string(),
         channels_count: channel_count,

@@ -157,9 +157,9 @@ class ProfileService(
                         name = p.name,
                         phase = "success",
                         message = "Running",
-                        channels = engineStatus.channels_count,
-                        hls = engineStatus.hls_addr,
-                        proxy = engineStatus.proxy_addr,
+                        channels = engineStatus.channelsCount,
+                        hls = engineStatus.hlsAddr,
+                        proxy = engineStatus.proxyAddr,
                         running = true,
                     )
                 }

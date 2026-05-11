@@ -139,10 +139,11 @@ data class RustStartResponse(
 
 @Serializable
 data class RustProfileStatus(
+    val id: Int = 0,
     val phase: String = "idle",
     val message: String = "",
-    val channels_count: Int = 0,
-    val hls_addr: String = "",
-    val proxy_addr: String = "",
+    val channelsCount: Int = 0,
+    val hlsAddr: String = "",
+    val proxyAddr: String = "",
     val running: Boolean = false,
 )

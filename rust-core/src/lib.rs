@@ -85,7 +85,9 @@ pub struct ProfileRunner {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProfileStatus {
+    pub id: i32,
     pub phase: String,
     pub message: String,
     pub channels_count: usize,
@@ -97,6 +99,7 @@ pub struct ProfileStatus {
 impl Default for ProfileStatus {
     fn default() -> Self {
         Self {
+            id: 0,
             phase: "idle".to_string(),
             message: "Not started".to_string(),
             channels_count: 0,

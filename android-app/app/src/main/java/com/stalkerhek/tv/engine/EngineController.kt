@@ -52,11 +52,12 @@ data class ProfileConfig(
 
 @Serializable
 data class ProfileStatus(
+    val id: Int = 0,
     val phase: String = "idle",
     val message: String = "Not started",
-    @SerialName("channels_count") val channelsCount: Int = 0,
-    @SerialName("hls_addr") val hlsAddr: String = "",
-    @SerialName("proxy_addr") val proxyAddr: String = "",
+    val channelsCount: Int = 0,
+    val hlsAddr: String = "",
+    val proxyAddr: String = "",
     val running: Boolean = false,
 )
 
