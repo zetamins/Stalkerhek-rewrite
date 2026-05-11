@@ -59,7 +59,7 @@ async fn main() {
 
     let app = api::build_router(state.clone());
 
-    let bind_addr = std::env::var("STALKERHEK_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:9900".to_string());
+    let bind_addr = std::env::var("STALKERHEK_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:9900".to_string());
     tracing::info!("Stalkerhek Engine starting on {bind_addr}");
     let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
