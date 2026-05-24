@@ -44,6 +44,9 @@ async fn main() {
         tracing::info!("Loaded {} profile(s) from data/profiles.json", profiles.len());
     }
 
+    // Load persisted favourites
+    let favs = Arc::new(RwLock::new(api::load_favourites(data_dir)));
+
     // Auto-start the first profile (lowest ID)
     let first_id = {
         let profiles = state.profiles.read().await;
@@ -57,7 +60,8 @@ async fn main() {
         }
     }
 
-    let app = api::build_router(state.clone());
+    // Use build_router_v2 to include favourites, search, EPG, and health endpoints
+    let app = api::build_router_v2(state.clone(), favs);
 
     let bind_addr = std::env::var("STALKERHEK_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:9900".to_string());
     tracing::info!("Stalkerhek Engine starting on {bind_addr}");
