@@ -301,10 +301,14 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeGetC
                     let is_disabled = disabled_channels.contains(&ch.cmd)
                         || (disabled_genres.contains(&ch.genre_id)
                             && !enabled_channels.contains(&ch.cmd));
+                    // Apply rename so the title returned to the UI matches the
+                    // HLS server's URL path (which is built from the renamed title).
+                    let display_title = filters.apply_rename(profile_id, &ch.title);
+                    let display_genre = filters.apply_genre_rename(profile_id, &ch.genre_id, &ch.genre);
                     serde_json::json!({
                         "cmd": ch.cmd,
-                        "title": ch.title,
-                        "genre": ch.genre,
+                        "title": display_title,
+                        "genre": display_genre,
                         "genreId": ch.genre_id,
                         "logo": ch.logo,
                         "enabled": !is_disabled,
