@@ -265,8 +265,12 @@ async fn epg_handler(
 async fn refresh_and_retry(
     st: &HlsState, title: &str, suffix: &str, scheme: &str, host: &str,
 ) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
-    let client = st.portal_client.write().await;
-    let fresh = client.get_channels().await?;
+    // Release the write lock immediately after the network call so concurrent
+    // STB requests are not blocked for the duration of the HTTP round-trip.
+    let fresh = {
+        let client = st.portal_client.write().await;
+        client.get_channels().await?
+    };
 
     // Rebuild channel states
     let mut new_map = HashMap::new();
@@ -286,7 +290,6 @@ async fn refresh_and_retry(
     // Update cached channels so subsequent requests benefit too
     *st.channels.write().await = new_states;
     *st.channel_map.write().await = new_map;
-    drop(client);
 
     let new_target = if suffix.is_empty() {
         new_url

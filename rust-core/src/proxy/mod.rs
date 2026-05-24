@@ -519,9 +519,13 @@ fn generate_create_link_response(stream_url: &str, id: &str, ch_id: &str) -> Str
 async fn proxy_refresh_and_retry(
     st: &ProxyState, query: &ProxyQuery, headers: &HeaderMap, _original_url: &str, client: &reqwest::Client,
 ) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
-    // Re-fetch channels to get fresh play_tokens
-    let client_lock = st.portal_client.write().await;
-    let fresh = client_lock.get_channels().await?;
+    // Re-fetch channels to get fresh play_tokens.
+    // Release the write lock immediately after the network call so concurrent
+    // STB requests are not blocked for the duration of the HTTP round-trip.
+    let fresh = {
+        let client_lock = st.portal_client.write().await;
+        client_lock.get_channels().await?
+    };
 
     // Find matching channel cmd in fresh data
     let cmd = query.cmd.as_deref().unwrap_or("");

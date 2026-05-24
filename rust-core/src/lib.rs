@@ -75,6 +75,7 @@ pub struct ProfileRunner {
     pub config: ProfileConfig,
     pub cancel_hls: Option<tokio::sync::oneshot::Sender<()>>,
     pub cancel_proxy: Option<tokio::sync::oneshot::Sender<()>>,
+    pub cancel_watchdog: Option<tokio::sync::oneshot::Sender<()>>,
     pub channels: Arc<RwLock<Option<Vec<stalker::Channel>>>>,
     pub vod_channels: Arc<RwLock<Option<Vec<stalker::Channel>>>>,
     pub series_channels: Arc<RwLock<Option<Vec<stalker::Channel>>>>,

@@ -133,8 +133,8 @@ async fn create_profile(
         mac: req.mac.to_uppercase(),
         username: req.username.unwrap_or_default(),
         password: req.password.unwrap_or_default(),
-        hls_port: req.hls_port.unwrap_or(4600),
-        proxy_port: req.proxy_port.unwrap_or(4800),
+        hls_port: req.hls_port.unwrap_or(4600 + (new_id as u16).saturating_sub(1) * 2),
+        proxy_port: req.proxy_port.unwrap_or(4601 + (new_id as u16).saturating_sub(1) * 2),
         timezone: req.timezone.unwrap_or_else(|| "UTC".to_string()),
         serial_number: req.serial_number.unwrap_or_else(|| "0000000000000".to_string()),
         device_id: req.device_id.unwrap_or_else(|| "f".repeat(64)),
@@ -178,8 +178,10 @@ async fn delete_profile(
             if let Some(cancel) = runner.cancel_proxy {
                 let _ = cancel.send(());
             }
+            if let Some(cancel) = runner.cancel_watchdog {
+                let _ = cancel.send(());
+            }
         }
-        profiles.remove(pos);
         save_profiles(&profiles, &st.data_dir);
         StatusCode::OK
     } else {
@@ -214,6 +216,9 @@ pub async fn start_profile_by_id(
                 let _ = cancel.send(());
             }
             if let Some(cancel) = runner.cancel_proxy {
+                let _ = cancel.send(());
+            }
+            if let Some(cancel) = runner.cancel_watchdog {
                 let _ = cancel.send(());
             }
         }
@@ -311,13 +316,22 @@ pub async fn start_profile_by_id(
     // Start watchdog
     let watchdog_portal = portal_client.clone();
     let watchdog_interval = profile.watchdog_interval;
+    let (watchdog_cancel_tx, watchdog_cancel_rx) = tokio::sync::oneshot::channel::<()>();
     if watchdog_interval > 0 {
         tokio::spawn(async move {
+            let mut cancel = watchdog_cancel_rx;
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(watchdog_interval as u64 * 60)).await;
-                let client = watchdog_portal.read().await;
-                if let Err(e) = client.watchdog_update().await {
-                    tracing::warn!("Watchdog update failed for profile {profile_id}: {e}");
+                tokio::select! {
+                    _ = &mut cancel => {
+                        tracing::info!("Watchdog cancelled for profile {profile_id}");
+                        break;
+                    }
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(watchdog_interval as u64 * 60)) => {
+                        let client = watchdog_portal.read().await;
+                        if let Err(e) = client.watchdog_update().await {
+                            tracing::warn!("Watchdog update failed for profile {profile_id}: {e}");
+                        }
+                    }
                 }
             }
         });
@@ -428,6 +442,7 @@ pub async fn start_profile_by_id(
         config: profile,
         cancel_hls: Some(hls_cancel_tx),
         cancel_proxy: Some(proxy_cancel_tx),
+        cancel_watchdog: Some(watchdog_cancel_tx),
         channels: Arc::new(RwLock::new(Some(channels))),
         vod_channels: Arc::new(RwLock::new(None)),
         series_channels: Arc::new(RwLock::new(None)),
@@ -457,6 +472,9 @@ async fn stop_profile(
             let _ = cancel.send(());
         }
         if let Some(cancel) = runner.cancel_proxy {
+            let _ = cancel.send(());
+        }
+        if let Some(cancel) = runner.cancel_watchdog {
             let _ = cancel.send(());
         }
         Ok(Json(serde_json::json!({"ok": true})))
