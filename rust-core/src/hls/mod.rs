@@ -23,7 +23,7 @@ pub struct HlsState {
     pub filter: Arc<RwLock<FilterStore>>,
     pub portal_client: Arc<RwLock<stalker::PortalClient>>,
     pub profile_id: i32,
-    pub token: String,
+    pub token: Arc<RwLock<String>>,
     pub serial_number: String,
     pub mac: String,
     pub timezone: String,
@@ -58,7 +58,7 @@ pub fn build_router(
         filter,
         portal_client,
         profile_id,
-        token,
+        token: Arc::new(RwLock::new(token)),
         serial_number,
         mac,
         timezone,
@@ -155,9 +155,10 @@ async fn channel_handler(
     };
 
     // Try the request
+    let current_token = st.token.read().await.clone();
     let result = proxy_request(
         &target_url, &scheme, &host, &title, &cmd, !suffix.is_empty(),
-        &st.token, &st.serial_number, &st.mac, &st.timezone, &st.model,
+        &current_token, &st.serial_number, &st.mac, &st.timezone, &st.model,
     ).await;
 
     // On 458 (Cloudflare ban) for initial playlist, retry with fresh channel data
@@ -213,8 +214,9 @@ async fn epg_handler(
     };
 
     let mut req = client.get(&epg_url);
+    let epg_token = st.token.read().await.clone();
     req = crate::mag::apply_mag_headers(
-        req, &st.token, &st.serial_number, &st.mac, &st.timezone, &st.model,
+        req, &epg_token, &st.serial_number, &st.mac, &st.timezone, &st.model,
     );
 
     // Use the profile's configured timezone for EPG timeshift metadata.
@@ -292,7 +294,9 @@ async fn refresh_and_retry(
     *st.channel_map.write().await = new_map;
 
     // Read the freshest token from portal_client (may have changed during get_channels)
+    // and update the shared token so all subsequent requests use it immediately.
     let fresh_token = st.portal_client.read().await.token.clone();
+    *st.token.write().await = fresh_token.clone();
 
     let new_target = if suffix.is_empty() {
         new_url

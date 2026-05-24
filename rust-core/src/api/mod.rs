@@ -17,7 +17,12 @@ use crate::stalker;
 pub(crate) fn save_profiles(profiles: &[ProfileConfig], data_dir: &std::path::Path) {
     if let Ok(data) = serde_json::to_string_pretty(profiles) {
         let _ = std::fs::create_dir_all(data_dir);
-        let _ = std::fs::write(data_dir.join("profiles.json"), data);
+        // Use a temp file + atomic rename to avoid partial writes corrupting the file
+        let path = data_dir.join("profiles.json");
+        let tmp = data_dir.join("profiles.json.tmp");
+        if std::fs::write(&tmp, &data).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
     }
 }
 
@@ -50,7 +55,11 @@ pub(crate) fn save_filters(filters: &crate::filter::FilterStore, data_dir: &std:
     }).collect();
     if let Ok(data) = serde_json::to_string_pretty(&snapshot) {
         let _ = std::fs::create_dir_all(data_dir);
-        let _ = std::fs::write(data_dir.join("filters.json"), data);
+        let path = data_dir.join("filters.json");
+        let tmp = data_dir.join("filters.json.tmp");
+        if std::fs::write(&tmp, &data).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
     }
 }
 
@@ -168,7 +177,7 @@ async fn delete_profile(
 ) -> StatusCode {
     let mut profiles = st.profiles.write().await;
     if let Some(pos) = profiles.iter().position(|p| p.id == id) {
-        // Stop if running
+        // Stop runner if running
         let mut runners = st.runners.write().await;
         if let Some(rpos) = runners.iter().position(|r| r.config.id == id) {
             let runner = runners.swap_remove(rpos);
@@ -182,6 +191,8 @@ async fn delete_profile(
                 let _ = cancel.send(());
             }
         }
+        // Remove the profile from the list
+        profiles.remove(pos);
         save_profiles(&profiles, &st.data_dir);
         StatusCode::OK
     } else {
