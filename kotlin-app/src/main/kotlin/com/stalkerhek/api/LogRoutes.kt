@@ -16,24 +16,8 @@ import java.time.Instant
 
 fun Routing.logRoutes(logService: LogService, authStore: AuthStore) {
     val authEnabled = System.getenv("STALKERHEK_DISABLE_AUTH") != "1"
-    val allowRegistration = System.getenv("STALKERHEK_ALLOW_REGISTER") == "1"
 
-    fun getSessionUsername(call: ApplicationCall): String? {
-        return call.sessions.get<SessionData>()?.username?.takeIf { it.isNotEmpty() }
-    }
-
-    fun isTrustedIP(call: ApplicationCall): Boolean {
-        val ip = call.request.local.remoteHost ?: "unknown"
-        return ip == "127.0.0.1" || ip == "0:0:0:0:0:0:0:1" || ip.startsWith("10.") ||
-                ip.startsWith("192.168.") || ip.startsWith("172.16.") || ip.startsWith("172.17.")
-    }
-
-    fun checkAuth(call: ApplicationCall): Boolean {
-        if (!authEnabled) return true
-        if (!authStore.hasUsers()) return true
-        if (isTrustedIP(call)) return true
-        return getSessionUsername(call) != null
-    }
+    fun checkAuth(call: ApplicationCall) = checkAuth(call, authEnabled, authStore)
 
     // Instance logs page
     get("/logs") {

@@ -387,6 +387,7 @@ pub async fn start_profile_by_id(
         let serial_number = profile.serial_number.clone();
         let mac = profile.mac.clone();
         let timezone = profile.timezone.clone();
+        let model = profile.model.clone();
         let device_id = profile.device_id.clone();
         let device_id2 = profile.device_id2.clone();
         let hls_port = profile.hls_port;
@@ -406,6 +407,7 @@ pub async fn start_profile_by_id(
                 serial_number,
                 mac,
                 timezone,
+                model,
                 device_id,
                 device_id2,
                 format!("0.0.0.0:{}", hls_port),

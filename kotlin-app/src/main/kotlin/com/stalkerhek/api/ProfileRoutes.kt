@@ -14,6 +14,8 @@ import kotlinx.serialization.encodeToString
 fun Routing.profileRoutes(profileService: ProfileService, authStore: AuthStore, logService: LogService) {
     val authEnabled = System.getenv("STALKERHEK_DISABLE_AUTH") != "1"
 
+    fun auth(call: ApplicationCall) = checkAuth(call, authEnabled, authStore)
+
     get("/dashboard") {
         val profiles = profileService.listProfiles()
         val statuses = profileService.listStatuses()
@@ -67,12 +69,14 @@ fun Routing.profileRoutes(profileService: ProfileService, authStore: AuthStore, 
 
     // API: list profiles
     get("/api/profiles") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@get }
         val profiles = profileService.listProfiles()
         call.respondText(json.encodeToString(profiles), ContentType.Application.Json)
     }
 
     // API: get single profile
     get("/api/profiles/{id}") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@get }
         val id = call.parameters["id"]?.toIntOrNull() ?: return@get call.respondText("bad request", status = HttpStatusCode.BadRequest)
         val profile = profileService.getProfile(id) ?: return@get call.respondText("not found", status = HttpStatusCode.NotFound)
         call.respondText(json.encodeToString(profile), ContentType.Application.Json)
@@ -80,6 +84,7 @@ fun Routing.profileRoutes(profileService: ProfileService, authStore: AuthStore, 
 
     // API: create profile
     post("/api/profiles") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@post }
         val params = call.receiveParameters()
         val profile = Profile(
             name = params["name"]?.trim() ?: "",
@@ -107,6 +112,7 @@ fun Routing.profileRoutes(profileService: ProfileService, authStore: AuthStore, 
 
     // API: update profile
     put("/api/profiles/{id}") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@put }
         val id = call.parameters["id"]?.toIntOrNull() ?: return@put call.respondText("bad request", status = HttpStatusCode.BadRequest)
         val existing = profileService.getProfile(id) ?: return@put call.respondText("not found", status = HttpStatusCode.NotFound)
         val params = call.receiveParameters()
@@ -126,6 +132,7 @@ fun Routing.profileRoutes(profileService: ProfileService, authStore: AuthStore, 
 
     // API: delete profile
     delete("/api/profiles/{id}") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@delete }
         val id = call.parameters["id"]?.toIntOrNull() ?: return@delete call.respondText("bad request", status = HttpStatusCode.BadRequest)
         profileService.stopProfile(id)
         profileService.deleteProfile(id)
@@ -134,6 +141,7 @@ fun Routing.profileRoutes(profileService: ProfileService, authStore: AuthStore, 
 
     // API: start profile
     post("/api/profiles/start") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@post }
         val id = call.receiveParameters()["id"]?.toIntOrNull() ?: return@post call.respondText("id required", status = HttpStatusCode.BadRequest)
         GlobalScope.launch { profileService.startProfile(id) }
         call.respondText("""{"ok":true}""", ContentType.Application.Json)
@@ -141,6 +149,7 @@ fun Routing.profileRoutes(profileService: ProfileService, authStore: AuthStore, 
 
     // Web form: start profile
     post("/profiles/start") {
+        if (!auth(call)) { call.respondRedirect("/login"); return@post }
         val id = call.receiveParameters()["id"]?.toIntOrNull()
         if (id != null) GlobalScope.launch { profileService.startProfile(id) }
         call.respondRedirect("/dashboard")
@@ -148,6 +157,7 @@ fun Routing.profileRoutes(profileService: ProfileService, authStore: AuthStore, 
 
     // API: stop profile
     post("/api/profiles/stop") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@post }
         val id = call.receiveParameters()["id"]?.toIntOrNull() ?: return@post call.respondText("id required", status = HttpStatusCode.BadRequest)
         profileService.stopProfile(id)
         call.respondText("""{"ok":true}""", ContentType.Application.Json)
@@ -155,6 +165,7 @@ fun Routing.profileRoutes(profileService: ProfileService, authStore: AuthStore, 
 
     // Web form: stop profile
     post("/profiles/stop") {
+        if (!auth(call)) { call.respondRedirect("/login"); return@post }
         val id = call.receiveParameters()["id"]?.toIntOrNull()
         if (id != null) profileService.stopProfile(id)
         call.respondRedirect("/dashboard")
@@ -162,6 +173,7 @@ fun Routing.profileRoutes(profileService: ProfileService, authStore: AuthStore, 
 
     // Web form: delete profile
     post("/profiles/delete") {
+        if (!auth(call)) { call.respondRedirect("/login"); return@post }
         val id = call.receiveParameters()["id"]?.toIntOrNull()
         if (id != null) {
             profileService.stopProfile(id)
@@ -172,6 +184,7 @@ fun Routing.profileRoutes(profileService: ProfileService, authStore: AuthStore, 
 
     // API: profile status (all)
     get("/api/profile_status") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@get }
         val statuses = profileService.listStatuses()
         call.respondText(json.encodeToString(statuses), ContentType.Application.Json)
     }

@@ -67,66 +67,69 @@ class ProfileService(
         val profile = profileStore.get(id) ?: return Result.failure(Exception("Profile not found"))
         return runCatching {
             busyStatus[id] = true
-            logService.append(id, "Starting...")
-            logService.appendInstance("Profile #$id starting...")
+            try {
+                logService.append(id, "Starting...")
+                logService.appendInstance("Profile #$id starting...")
 
-            val rustCfg = RustProfileConfig(
-                id = profile.id,
-                name = profile.name,
-                portal_url = profile.portalUrl,
-                mac = profile.mac,
-                username = profile.username,
-                password = profile.password,
-                hls_port = profile.hlsPort,
-                proxy_port = profile.proxyPort,
-                timezone = profile.timezone,
-                model = profile.model,
-                device_id_auth = profile.deviceIdAuth,
-                hls_enabled = profile.hlsEnabled,
-                proxy_enabled = profile.proxyEnabled,
-                proxy_rewrite = profile.proxyRewrite,
-                serial_number = profile.serialNumber,
-                device_id = profile.deviceId,
-                device_id2 = profile.deviceId2,
-                signature = profile.signature,
-                watchdog_interval = profile.watchdogInterval,
-            )
+                val rustCfg = RustProfileConfig(
+                    id = profile.id,
+                    name = profile.name,
+                    portal_url = profile.portalUrl,
+                    mac = profile.mac,
+                    username = profile.username,
+                    password = profile.password,
+                    hls_port = profile.hlsPort,
+                    proxy_port = profile.proxyPort,
+                    timezone = profile.timezone,
+                    model = profile.model,
+                    device_id_auth = profile.deviceIdAuth,
+                    hls_enabled = profile.hlsEnabled,
+                    proxy_enabled = profile.proxyEnabled,
+                    proxy_rewrite = profile.proxyRewrite,
+                    serial_number = profile.serialNumber,
+                    device_id = profile.deviceId,
+                    device_id2 = profile.deviceId2,
+                    signature = profile.signature,
+                    watchdog_interval = profile.watchdogInterval,
+                )
 
-            rustEngine.createProfile(rustCfg)
-            val result = rustEngine.startProfile(rustCfg)
-            result.fold(
-                onSuccess = { startResp ->
-                    profileStatuses[id] = ProfileStatus(
-                        id = id,
-                        name = profile.name,
-                        phase = "success",
-                        message = "Running",
-                        channels = startResp.channels,
-                        hls = ":${profile.hlsPort}",
-                        proxy = ":${profile.proxyPort}",
-                        running = true,
-                    )
-                    GlobalScope.launch {
-                        val channels = rustEngine.getChannels(id)
-                        channelCache[id] = channels
+                // Upsert profile config into Rust engine, then start it
+                rustEngine.createProfile(rustCfg)
+                val result = rustEngine.startProfile(rustCfg)
+                result.fold(
+                    onSuccess = { startResp ->
+                        profileStatuses[id] = ProfileStatus(
+                            id = id,
+                            name = profile.name,
+                            phase = "success",
+                            message = "Running",
+                            channels = startResp.channels,
+                            hls = ":${profile.hlsPort}",
+                            proxy = ":${profile.proxyPort}",
+                            running = true,
+                        )
+                        GlobalScope.launch {
+                            val channels = rustEngine.getChannels(id)
+                            channelCache[id] = channels
+                        }
+                        logService.append(id, "Started successfully with ${startResp.channels} channels")
+                        logService.appendInstance("Profile #$id started — ${startResp.channels} channels")
+                    },
+                    onFailure = { e ->
+                        profileStatuses[id] = ProfileStatus(
+                            id = id,
+                            name = profile.name,
+                            phase = "error",
+                            message = e.message ?: "Unknown error",
+                        )
+                        logService.append(id, "Failed to start: ${e.message}")
+                        logService.appendInstance("Profile #$id failed: ${e.message}")
                     }
-                    logService.append(id, "Started successfully with ${startResp.channels} channels")
-                    logService.appendInstance("Profile #$id started — ${startResp.channels} channels")
-                    busyStatus[id] = false
-                },
-                onFailure = { e ->
-                    profileStatuses[id] = ProfileStatus(
-                        id = id,
-                        name = profile.name,
-                        phase = "error",
-                        message = e.message ?: "Unknown error",
-                    )
-                    logService.append(id, "Failed to start: ${e.message}")
-                    logService.appendInstance("Profile #$id failed: ${e.message}")
-                    busyStatus[id] = false
-                }
-            )
-            busyStatus[id] = false
+                )
+            } finally {
+                // Always clear busy flag, even if an unexpected exception escapes
+                busyStatus[id] = false
+            }
         }
     }
 
@@ -174,11 +177,11 @@ class LogService {
     private val instanceLogs = mutableListOf<String>()
     private val maxEntries = 600
     private val instanceMax = 2000
-    private var nextId = 1L
+    private val nextId = java.util.concurrent.atomic.AtomicLong(1)
 
     fun append(profileId: Int, msg: String) {
         if (profileId <= 0 || msg.isBlank()) return
-        val entry = LogEntryInternal(nextId++, Instant.now(), msg)
+        val entry = LogEntryInternal(nextId.getAndIncrement(), Instant.now(), msg)
         val logs = profileLogs.getOrPut(profileId) { mutableListOf() }
         synchronized(logs) {
             logs.add(entry)

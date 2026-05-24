@@ -19,23 +19,10 @@ fun Routing.authRoutes(authStore: AuthStore) {
     val authService = AuthService(authStore)
     val authEnabled = System.getenv("STALKERHEK_DISABLE_AUTH") != "1"
     val allowRegistration = System.getenv("STALKERHEK_ALLOW_REGISTER") == "1"
-    val trustedSubnets = listOf("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "::1/128")
 
-    fun isTrustedIP(request: ApplicationRequest): Boolean {
-        val ip = request.local.remoteHost ?: "unknown"
-        return ip == "127.0.0.1" || ip == "0:0:0:0:0:0:0:1" || ip.startsWith("10.") ||
-                ip.startsWith("192.168.") || ip.startsWith("172.16.") || ip.startsWith("172.17.")
-    }
+    fun getSessionUsername(call: ApplicationCall) = getSessionUsername(call)
 
-    fun getSessionUsername(call: ApplicationCall): String? {
-        return call.sessions.get<SessionData>()?.username?.takeIf { it.isNotEmpty() }
-    }
-
-    fun checkAuth(call: ApplicationCall): Boolean {
-        if (!authEnabled) return true
-        if (isTrustedIP(call.request)) return true
-        return getSessionUsername(call) != null
-    }
+    fun checkAuth(call: ApplicationCall) = checkAuth(call, authEnabled, authStore)
 
     // Public pages
     get("/login") {

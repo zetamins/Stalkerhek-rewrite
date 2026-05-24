@@ -26,7 +26,7 @@ static TZ_CACHE: std::sync::LazyLock<Mutex<HashMap<String, TzEntry>>> = std::syn
 /// to return European CDN/Cloudflare edge IPs.
 pub async fn resolve_european(hostname: &str) -> Vec<IpAddr> {
     {
-        let cache = DNS_CACHE.lock().unwrap();
+        let cache = DNS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = cache.get(hostname) {
             if entry.expires > Instant::now() {
                 return entry.ips.clone();
@@ -49,7 +49,7 @@ pub async fn resolve_european(hostname: &str) -> Vec<IpAddr> {
     };
 
     if !ips.is_empty() {
-        let mut cache = DNS_CACHE.lock().unwrap();
+        let mut cache = DNS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         cache.insert(hostname.to_string(), DnsEntry {
             ips: ips.clone(),
             expires: Instant::now() + Duration::from_secs(300),
@@ -85,7 +85,7 @@ async fn resolve_doh(url: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error
 pub async fn get_european_timezone(hostname: &str) -> String {
     // Check cache first
     {
-        let cache = TZ_CACHE.lock().unwrap();
+        let cache = TZ_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = cache.get(hostname) {
             if entry.expires > Instant::now() {
                 return entry.tz.clone();
@@ -117,7 +117,7 @@ pub async fn get_european_timezone(hostname: &str) -> String {
     };
 
     {
-        let mut cache = TZ_CACHE.lock().unwrap();
+        let mut cache = TZ_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         cache.insert(hostname.to_string(), TzEntry {
             tz: tz.clone(),
             expires: Instant::now() + Duration::from_secs(3600),

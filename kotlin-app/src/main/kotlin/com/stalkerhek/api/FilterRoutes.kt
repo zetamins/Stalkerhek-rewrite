@@ -14,6 +14,9 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 
 fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, filterStore: FilterStore, rustEngine: RustEngineClient) {
+    val authEnabled = System.getenv("STALKERHEK_DISABLE_AUTH") != "1"
+
+    fun auth(call: ApplicationCall) = checkAuth(call, authEnabled, authStore)
 
     suspend fun getChannelList(profileId: Int): List<ChannelInfo> {
         val cached = profileService.getChannelCache(profileId)
@@ -24,17 +27,22 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
 
     fun applyRename(title: String, filter: ProfileFilterState): String {
         var t = title
-        if (filter.renamePrefix.isNotEmpty() && t.startsWith(filter.renamePrefix)) {
-            t = t.removePrefix(filter.renamePrefix)
+        if (filter.renamePrefix.isNotEmpty()) {
+            for (prefix in filter.renamePrefix.split(',').map { it.trim() }.filter { it.isNotEmpty() }) {
+                if (t.startsWith(prefix)) { t = t.removePrefix(prefix); break }
+            }
         }
-        if (filter.renameSuffix.isNotEmpty() && t.endsWith(filter.renameSuffix)) {
-            t = t.removeSuffix(filter.renameSuffix)
+        if (filter.renameSuffix.isNotEmpty()) {
+            for (suffix in filter.renameSuffix.split(',').map { it.trim() }.filter { it.isNotEmpty() }) {
+                if (t.endsWith(suffix)) { t = t.removeSuffix(suffix); break }
+            }
         }
         return t.trim()
     }
 
     // List all genres (flat list, no category derivation)
     get("/api/filters/genres") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@get }
         val pid = call.request.queryParameters["id"]?.toIntOrNull() ?: return@get call.respondText("bad request", status = HttpStatusCode.BadRequest)
         val channels = getChannelList(pid)
         val genreMap = linkedMapOf<String, GenreInfo>()
@@ -58,7 +66,8 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
     }
 
     get("/api/filters/channels") {
-        val pid = call.request.queryParameters["id"]?.toIntOrNull() ?: return@get call.respondText("{\"error\":\"missing id\"}", ContentType.Application.Json)
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@get }
+        val pid = call.request.queryParameters["id"]?.toIntOrNull() ?: return@get call.respondText("""{"error":"missing id"}""", ContentType.Application.Json)
         val query = call.request.queryParameters["query"]?.lowercase() ?: ""
         val genreId = call.request.queryParameters["genre_id"] ?: ""
         val state = call.request.queryParameters["state"]?.takeIf { it.isNotEmpty() } ?: "all"
@@ -91,6 +100,7 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
     }
 
     post("/api/filters/toggle_genre") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@post }
         val params = call.receiveParameters()
         val pid = params["id"]?.toIntOrNull() ?: return@post call.respondText("bad request", status = HttpStatusCode.BadRequest)
         val gid = params["genre_id"]?.trim() ?: return@post call.respondText("missing genre_id", status = HttpStatusCode.BadRequest)
@@ -103,6 +113,7 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
     }
 
     post("/api/filters/toggle_channel") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@post }
         val params = call.receiveParameters()
         val pid = params["id"]?.toIntOrNull() ?: return@post call.respondText("bad request", status = HttpStatusCode.BadRequest)
         val cmd = params["cmd"]?.trim() ?: return@post call.respondText("missing cmd", status = HttpStatusCode.BadRequest)
@@ -116,6 +127,7 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
     }
 
     post("/api/filters/reset") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@post }
         val pid = call.receiveParameters()["id"]?.toIntOrNull()
         if (pid != null) {
             filterStore.reset(pid)
@@ -126,6 +138,7 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
 
     // VOD genres (from portal categories, no item loading)
     get("/api/filters/vod_genres") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@get }
         val pid = call.request.queryParameters["id"]?.toIntOrNull() ?: return@get call.respondText("bad request", status = HttpStatusCode.BadRequest)
         val filter = filterStore.get(pid)
         val cats = rustEngine.getCategories(pid, "vod")
@@ -139,6 +152,7 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
 
     // Series genres (from portal categories, no item loading)
     get("/api/filters/series_genres") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@get }
         val pid = call.request.queryParameters["id"]?.toIntOrNull() ?: return@get call.respondText("bad request", status = HttpStatusCode.BadRequest)
         val filter = filterStore.get(pid)
         val cats = rustEngine.getCategories(pid, "series")
@@ -152,6 +166,7 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
 
     // Rename rules: get
     get("/api/filters/rename_rules") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@get }
         val pid = call.request.queryParameters["id"]?.toIntOrNull() ?: return@get call.respondText("bad request", status = HttpStatusCode.BadRequest)
         val filter = filterStore.get(pid)
         call.respondText(json.encodeToString(mapOf(
@@ -162,6 +177,7 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
 
     // Rename rules: save
     post("/api/filters/rename_rules") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@post }
         val params = call.receiveParameters()
         val pid = params["id"]?.toIntOrNull() ?: return@post call.respondText("bad request", status = HttpStatusCode.BadRequest)
         val filter = filterStore.get(pid)
@@ -179,6 +195,7 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
 
     // Genre rename: get current renames
     get("/api/filters/genre_renames") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@get }
         val pid = call.request.queryParameters["id"]?.toIntOrNull() ?: return@get call.respondText("bad request", status = HttpStatusCode.BadRequest)
         val filter = filterStore.get(pid)
         call.respondText(json.encodeToString(mapOf(
@@ -188,6 +205,7 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
 
     // Genre rename: save/remove a rename
     post("/api/filters/rename_genre") {
+        if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@post }
         val params = call.receiveParameters()
         val pid = params["id"]?.toIntOrNull() ?: return@post call.respondText("bad request", status = HttpStatusCode.BadRequest)
         val gid = params["genre_id"]?.trim() ?: return@post call.respondText("missing genre_id", status = HttpStatusCode.BadRequest)

@@ -129,6 +129,9 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeShut
                 if let Some(cancel) = runner.cancel_proxy {
                     let _ = cancel.send(());
                 }
+                if let Some(cancel) = runner.cancel_watchdog {
+                    let _ = cancel.send(());
+                }
             }
         });
     }
@@ -217,6 +220,9 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeStop
                 let _ = cancel.send(());
             }
             if let Some(cancel) = runner.cancel_proxy {
+                let _ = cancel.send(());
+            }
+            if let Some(cancel) = runner.cancel_watchdog {
                 let _ = cancel.send(());
             }
         }
@@ -408,6 +414,9 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeDele
                     let _ = cancel.send(());
                 }
                 if let Some(cancel) = runner.cancel_proxy {
+                    let _ = cancel.send(());
+                }
+                if let Some(cancel) = runner.cancel_watchdog {
                     let _ = cancel.send(());
                 }
             }

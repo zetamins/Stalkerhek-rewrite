@@ -32,6 +32,7 @@ pub struct ProxyState {
     pub serial_number: String,
     pub mac: String,
     pub timezone: String,
+    pub model: String,
     pub device_id: String,
     pub device_id2: String,
     pub hls_bind: String,
@@ -50,6 +51,7 @@ pub fn build_router(
     serial_number: String,
     mac: String,
     timezone: String,
+    model: String,
     device_id: String,
     device_id2: String,
     hls_bind: String,
@@ -88,6 +90,7 @@ pub fn build_router(
         serial_number,
         mac,
         timezone,
+        model,
         device_id,
         device_id2,
         hls_bind,
@@ -388,10 +391,8 @@ async fn proxy_handler(
 
         // Apply MAG headers
         proxy_req = crate::mag::apply_mag_headers(
-            proxy_req, &st.token, &st.serial_number, &st.mac, &st.timezone, "MAG254",
+            proxy_req, &st.token, &st.serial_number, &st.mac, &st.timezone, &st.model,
         );
-
-        let referer_host = match current_url.splitn(2, "://").nth(1).and_then(|r| r.split('/').next()) {
             Some(h) => format!("{}://{}/", if current_url.starts_with("https") { "https" } else { "http" }, h),
             None => format!("{}/", st.portal_base.trim_end_matches('/')),
         };
@@ -559,7 +560,7 @@ async fn proxy_refresh_and_retry(
         }
     }
     proxy_req = crate::mag::apply_mag_headers(
-        proxy_req, &st.token, &st.serial_number, &st.mac, &st.timezone, "MAG254",
+        proxy_req, &st.token, &st.serial_number, &st.mac, &st.timezone, &st.model,
     );
     let referer_host = st.portal_base.trim_end_matches('/');
     proxy_req = proxy_req.header("Referer", format!("{}/", referer_host))
