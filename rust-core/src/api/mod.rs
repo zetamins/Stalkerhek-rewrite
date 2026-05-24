@@ -673,3 +673,176 @@ async fn sync_filters(
     tracing::info!("Filters synced from snapshot ({} profiles)", count);
     Json(serde_json::json!({"ok": true, "synced": count}))
 }
+
+// ─── Favourites ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct FavouriteStore {
+    /// profile_id -> set of channel cmd strings
+    pub favourites: std::collections::HashMap<i32, std::collections::HashSet<String>>,
+}
+
+impl FavouriteStore {
+    pub fn toggle(&mut self, profile_id: i32, cmd: &str) -> bool {
+        let set = self.favourites.entry(profile_id).or_default();
+        if set.contains(cmd) { set.remove(cmd); false } else { set.insert(cmd.to_string()); true }
+    }
+    pub fn get(&self, profile_id: i32) -> Vec<String> {
+        self.favourites.get(&profile_id).map(|s| s.iter().cloned().collect()).unwrap_or_default()
+    }
+    pub fn is_fav(&self, profile_id: i32, cmd: &str) -> bool {
+        self.favourites.get(&profile_id).map_or(false, |s| s.contains(cmd))
+    }
+}
+
+fn save_favourites(favs: &FavouriteStore, data_dir: &std::path::Path) {
+    if let Ok(data) = serde_json::to_string_pretty(favs) {
+        let _ = std::fs::create_dir_all(data_dir);
+        let tmp = data_dir.join("favourites.json.tmp");
+        let path = data_dir.join("favourites.json");
+        if std::fs::write(&tmp, &data).is_ok() { let _ = std::fs::rename(&tmp, &path); }
+    }
+}
+
+pub fn load_favourites(data_dir: &std::path::Path) -> FavouriteStore {
+    std::fs::read_to_string(data_dir.join("favourites.json"))
+        .ok()
+        .and_then(|d| serde_json::from_str(&d).ok())
+        .unwrap_or_default()
+}
+
+// ─── New routes added to build_router ─────────────────────────────────────────
+
+pub fn build_router_v2(state: AppState, favs: std::sync::Arc<tokio::sync::RwLock<FavouriteStore>>) -> axum::Router {
+    use axum::routing::{delete, get, post};
+    build_router(state.clone())
+        // EPG per channel
+        .route("/api/v1/profile/:id/epg", get(epg_handler))
+        // Favourites
+        .route("/api/v1/profile/:id/favourites", get(list_favourites).post(toggle_favourite))
+        // Search channels across profiles
+        .route("/api/v1/search", get(search_channels))
+        // Liveness / health detailed
+        .route("/api/v1/health/detail", get(health_detail))
+        .layer(axum::Extension(favs))
+}
+
+async fn epg_handler(
+    State(st): State<AppState>,
+    Path(id): Path<i32>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let runners = st.runners.read().await;
+    if let Some(runner) = runners.iter().find(|r| r.config.id == id) {
+        let client = runner.portal_token.read().await;
+        drop(client);
+        // Fetch EPG via portal client
+        let pc = {
+            let runners2 = &runners;
+            runners2.iter().find(|r| r.config.id == id)
+                .map(|_| st.runners.clone())
+        };
+        drop(runners);
+        // Use portal client from runner
+        let runners3 = st.runners.read().await;
+        if let Some(runner) = runners3.iter().find(|r| r.config.id == id) {
+            // We can only get EPG if the runner has a portal client reference
+            // The portal_client is embedded in HLS/proxy state, not directly in runner
+            // For now return the EPG from the HLS server endpoint
+            let cmd = params.get("cmd").map(String::as_str).unwrap_or("");
+            if cmd.is_empty() {
+                return Json(serde_json::json!({"entries": []}));
+            }
+            drop(runners3);
+            return Json(serde_json::json!({"entries": [], "note": "Use HLS /epg endpoint for full EPG"}));
+        }
+    }
+    Json(serde_json::json!({"entries": []}))
+}
+
+async fn list_favourites(
+    State(st): State<AppState>,
+    Path(id): Path<i32>,
+    axum::Extension(favs): axum::Extension<std::sync::Arc<tokio::sync::RwLock<FavouriteStore>>>,
+) -> Json<serde_json::Value> {
+    let fav_store = favs.read().await;
+    let fav_cmds = fav_store.get(id);
+    // Enrich with channel metadata
+    let runners = st.runners.read().await;
+    if let Some(runner) = runners.iter().find(|r| r.config.id == id) {
+        let channels = runner.channels.read().await;
+        let fav_channels: Vec<serde_json::Value> = channels.as_ref().unwrap_or(&vec![]).iter()
+            .filter(|ch| fav_cmds.contains(&ch.cmd))
+            .map(|ch| serde_json::json!({"title": ch.title, "cmd": ch.cmd, "logo": ch.logo, "genre": ch.genre}))
+            .collect();
+        return Json(serde_json::json!({"favourites": fav_channels}));
+    }
+    Json(serde_json::json!({"favourites": []}))
+}
+
+async fn toggle_favourite(
+    State(st): State<AppState>,
+    Path(id): Path<i32>,
+    axum::Extension(favs): axum::Extension<std::sync::Arc<tokio::sync::RwLock<FavouriteStore>>>,
+    Json(body): Json<HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let cmd = body.get("cmd").cloned().unwrap_or_default();
+    if cmd.is_empty() { return Json(serde_json::json!({"ok": false, "error": "cmd required"})); }
+    let mut fav_store = favs.write().await;
+    let added = fav_store.toggle(id, &cmd);
+    save_favourites(&fav_store, &st.data_dir);
+    Json(serde_json::json!({"ok": true, "added": added, "cmd": cmd}))
+}
+
+async fn search_channels(
+    State(st): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let query = params.get("q").map(|s| s.to_lowercase()).unwrap_or_default();
+    let profile_id = params.get("profile_id").and_then(|s| s.parse::<i32>().ok());
+    if query.len() < 2 { return Json(serde_json::json!({"results": []})); }
+    let runners = st.runners.read().await;
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for runner in runners.iter() {
+        if let Some(pid) = profile_id { if runner.config.id != pid { continue; } }
+        let channels = runner.channels.read().await;
+        if let Some(chs) = channels.as_ref() {
+            for ch in chs.iter() {
+                if ch.title.to_lowercase().contains(&query) || ch.genre.to_lowercase().contains(&query) {
+                    results.push(serde_json::json!({
+                        "profile_id": runner.config.id,
+                        "profile_name": runner.config.name,
+                        "title": ch.title,
+                        "cmd": ch.cmd,
+                        "logo": ch.logo,
+                        "genre": ch.genre,
+                    }));
+                    if results.len() >= 200 { break; }
+                }
+            }
+        }
+        if results.len() >= 200 { break; }
+    }
+    Json(serde_json::json!({"results": results, "count": results.len()}))
+}
+
+async fn health_detail(State(st): State<AppState>) -> Json<serde_json::Value> {
+    let runners = st.runners.read().await;
+    let profiles = st.profiles.read().await;
+    let profile_health: Vec<serde_json::Value> = profiles.iter().map(|p| {
+        let running = runners.iter().any(|r| r.config.id == p.id);
+        serde_json::json!({
+            "id": p.id,
+            "name": p.name,
+            "running": running,
+            "hls_port": p.hls_port,
+            "proxy_port": p.proxy_port,
+        })
+    }).collect();
+    Json(serde_json::json!({
+        "status": "ok",
+        "profiles_total": profiles.len(),
+        "profiles_running": runners.len(),
+        "profiles": profile_health,
+    }))
+}

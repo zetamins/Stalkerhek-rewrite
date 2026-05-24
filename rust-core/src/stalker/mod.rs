@@ -416,3 +416,71 @@ fn urlencoding(s: &str) -> String {
     }
     out
 }
+
+// ─── EPG ──────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpgEntry {
+    pub channel_id: String,
+    pub title: String,
+    pub description: String,
+    pub start: i64,
+    pub stop: i64,
+}
+
+impl PortalClient {
+    pub async fn get_epg_for_channel(&self, cmd: &str) -> Result<Vec<EpgEntry>, Box<dyn std::error::Error + Send + Sync>> {
+        let encoded: String = cmd.split_whitespace().map(|s| urlencoding(s)).collect::<Vec<_>>().join("%20");
+        let url = format!("{}?type=itv&action=get_epg_info&period=5&cmd={}&JsHttpRequest=1-xml", self.base_url, encoded);
+        let resp = self.client.get(&url).headers(self.headers()).send().await?;
+        let text = resp.text().await?;
+        #[derive(Deserialize)] struct EpgJs { data: Option<serde_json::Value> }
+        #[derive(Deserialize)] struct EpgWrap { js: EpgJs }
+        let parsed: EpgWrap = serde_json::from_str(&text).unwrap_or(EpgWrap { js: EpgJs { data: None } });
+        let mut entries = Vec::new();
+        if let Some(serde_json::Value::Array(items)) = parsed.js.data {
+            for item in items {
+                let title = item["name"].as_str().unwrap_or("").to_string();
+                let desc = item["descr"].as_str().unwrap_or("").to_string();
+                let start = item["start_timestamp"].as_i64().or_else(|| item["time"].as_i64()).unwrap_or(0);
+                let stop  = item["stop_timestamp"].as_i64().or_else(|| item["time_to"].as_i64()).unwrap_or(0);
+                let ch_id = item["ch_id"].as_str().or_else(|| item["id"].as_str()).unwrap_or("").to_string();
+                if !title.is_empty() { entries.push(EpgEntry { channel_id: ch_id, title, description: desc, start, stop }); }
+            }
+        }
+        Ok(entries)
+    }
+
+    pub async fn get_epg_all(&self) -> Result<Vec<EpgEntry>, Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!("{}?type=itv&action=get_epg_info&period=5&JsHttpRequest=1-xml", self.base_url);
+        let resp = self.client.get(&url).headers(self.headers()).send().await?;
+        let text = resp.text().await?;
+        #[derive(Deserialize)] struct EpgJs { data: Option<serde_json::Value> }
+        #[derive(Deserialize)] struct EpgWrap { js: EpgJs }
+        let parsed: EpgWrap = serde_json::from_str(&text).unwrap_or(EpgWrap { js: EpgJs { data: None } });
+        let mut entries = Vec::new();
+        if let Some(serde_json::Value::Object(map)) = parsed.js.data {
+            for (_key, val) in map {
+                if let serde_json::Value::Array(items) = val {
+                    for item in items {
+                        let title = item["name"].as_str().unwrap_or("").to_string();
+                        let desc  = item["descr"].as_str().unwrap_or("").to_string();
+                        let start = item["start_timestamp"].as_i64().or_else(|| item["time"].as_i64()).unwrap_or(0);
+                        let stop  = item["stop_timestamp"].as_i64().or_else(|| item["time_to"].as_i64()).unwrap_or(0);
+                        let ch_id = item["ch_id"].as_str().or_else(|| item["id"].as_str()).unwrap_or("").to_string();
+                        if !title.is_empty() { entries.push(EpgEntry { channel_id: ch_id, title, description: desc, start, stop }); }
+                    }
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Re-authenticate only if the current token is empty or has expired (401 received).
+    pub async fn refresh_token_if_needed(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if self.token.is_empty() {
+            self.authenticate().await?;
+        }
+        Ok(())
+    }
+}

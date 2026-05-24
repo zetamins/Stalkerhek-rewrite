@@ -183,6 +183,12 @@ async fn channel_handler(
                         StatusCode::SERVICE_UNAVAILABLE.into_response()
                     });
             }
+            // 401: re-authenticate and retry once
+            if r.status().as_u16() == 401 {
+                if let Some(resp) = handle_401_and_retry(&st, &target_url, &scheme, &host, &title, &cmd, false).await {
+                    return resp;
+                }
+            }
         }
     }
 
@@ -528,4 +534,26 @@ fn host_from_request(req: &Request<Body>) -> String {
         }
     }
     "localhost".to_string()
+}
+
+// ─── Auto-reconnect on 401 ────────────────────────────────────────────────────
+/// Called when proxy_request receives a 401. Re-authenticates via portal_client
+/// and updates st.token, then retries the request with the new token.
+pub async fn handle_401_and_retry(
+    st: &HlsState,
+    url: &str, scheme: &str, host: &str,
+    title: &str, cmd: &str, is_suffix: bool,
+) -> Option<Response> {
+    tracing::warn!("[HLS] got 401 for {}, re-authenticating...", title);
+    // Re-authenticate
+    let new_token = {
+        let mut client = st.portal_client.write().await;
+        if client.authenticate().await.is_err() { return None; }
+        client.token.clone()
+    };
+    *st.token.write().await = new_token.clone();
+    tracing::info!("[HLS] re-auth succeeded, retrying {}", title);
+    proxy_request(url, scheme, host, title, cmd, is_suffix, &new_token,
+        &st.serial_number, &st.mac, &st.timezone, &st.model, &st.stream_client)
+        .await.ok()
 }
