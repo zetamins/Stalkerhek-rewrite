@@ -714,15 +714,11 @@ pub fn load_favourites(data_dir: &std::path::Path) -> FavouriteStore {
 // ─── New routes added to build_router ─────────────────────────────────────────
 
 pub fn build_router_v2(state: AppState, favs: std::sync::Arc<tokio::sync::RwLock<FavouriteStore>>) -> axum::Router {
-    use axum::routing::{delete, get, post};
+    use axum::routing::{get, post};
     build_router(state.clone())
-        // EPG per channel
         .route("/api/v1/profile/:id/epg", get(epg_handler))
-        // Favourites
         .route("/api/v1/profile/:id/favourites", get(list_favourites).post(toggle_favourite))
-        // Search channels across profiles
         .route("/api/v1/search", get(search_channels))
-        // Liveness / health detailed
         .route("/api/v1/health/detail", get(health_detail))
         .layer(axum::Extension(favs))
 }
@@ -732,32 +728,31 @@ async fn epg_handler(
     Path(id): Path<i32>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Json<serde_json::Value> {
-    let runners = st.runners.read().await;
-    if let Some(runner) = runners.iter().find(|r| r.config.id == id) {
-        let client = runner.portal_token.read().await;
-        drop(client);
-        // Fetch EPG via portal client
-        let pc = {
-            let runners2 = &runners;
-            runners2.iter().find(|r| r.config.id == id)
-                .map(|_| st.runners.clone())
-        };
-        drop(runners);
-        // Use portal client from runner
-        let runners3 = st.runners.read().await;
-        if let Some(runner) = runners3.iter().find(|r| r.config.id == id) {
-            // We can only get EPG if the runner has a portal client reference
-            // The portal_client is embedded in HLS/proxy state, not directly in runner
-            // For now return the EPG from the HLS server endpoint
-            let cmd = params.get("cmd").map(String::as_str).unwrap_or("");
-            if cmd.is_empty() {
-                return Json(serde_json::json!({"entries": []}));
-            }
-            drop(runners3);
-            return Json(serde_json::json!({"entries": [], "note": "Use HLS /epg endpoint for full EPG"}));
-        }
+    let cmd = params.get("cmd").cloned().unwrap_or_default();
+    if cmd.is_empty() {
+        return Json(serde_json::json!({"entries": [], "error": "cmd required"}));
     }
-    Json(serde_json::json!({"entries": []}))
+    // Find the portal_client for this profile via the HLS state stored in the runner config.
+    // The portal_client lives in the HLS/proxy axum state, not in ProfileRunner directly.
+    // We proxy the EPG request to the HLS server's /epg endpoint which has portal_client access.
+    let hls_port = {
+        let profiles = st.profiles.read().await;
+        profiles.iter().find(|p| p.id == id).map(|p| p.hls_port)
+    };
+    let Some(port) = hls_port else {
+        return Json(serde_json::json!({"entries": [], "error": "profile not found"}));
+    };
+    // Delegate to HLS server's EPG endpoint which has direct portal_client access
+    let url = format!("http://127.0.0.1:{}/epg?title={}", port, urlencoding(&cmd));
+    match reqwest::get(&url).await {
+        Ok(resp) => {
+            let text = resp.text().await.unwrap_or_default();
+            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({"entries": []}));
+            Json(parsed)
+        }
+        Err(e) => Json(serde_json::json!({"entries": [], "error": e.to_string()})),
+    }
+}
 }
 
 async fn list_favourites(
@@ -765,19 +760,29 @@ async fn list_favourites(
     Path(id): Path<i32>,
     axum::Extension(favs): axum::Extension<std::sync::Arc<tokio::sync::RwLock<FavouriteStore>>>,
 ) -> Json<serde_json::Value> {
-    let fav_store = favs.read().await;
-    let fav_cmds = fav_store.get(id);
-    // Enrich with channel metadata
-    let runners = st.runners.read().await;
-    if let Some(runner) = runners.iter().find(|r| r.config.id == id) {
-        let channels = runner.channels.read().await;
-        let fav_channels: Vec<serde_json::Value> = channels.as_ref().unwrap_or(&vec![]).iter()
-            .filter(|ch| fav_cmds.contains(&ch.cmd))
-            .map(|ch| serde_json::json!({"title": ch.title, "cmd": ch.cmd, "logo": ch.logo, "genre": ch.genre}))
-            .collect();
-        return Json(serde_json::json!({"favourites": fav_channels}));
+    // Read fav CMDs then immediately release the lock before touching runners
+    let fav_cmds: Vec<String> = favs.read().await.get(id);
+    if fav_cmds.is_empty() {
+        return Json(serde_json::json!({"favourites": []}));
     }
-    Json(serde_json::json!({"favourites": []}))
+    // Read channels snapshot then release runner lock before building response
+    let channels_snapshot: Option<Vec<stalker::Channel>> = {
+        let runners = st.runners.read().await;
+        if let Some(runner) = runners.iter().find(|r| r.config.id == id) {
+            let ch = runner.channels.read().await;
+            ch.clone()
+        } else {
+            None
+        }
+    };
+    let fav_channels: Vec<serde_json::Value> = channels_snapshot
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|ch| fav_cmds.contains(&ch.cmd))
+        .map(|ch| serde_json::json!({"title": ch.title, "cmd": ch.cmd, "logo": ch.logo, "genre": ch.genre}))
+        .collect();
+    Json(serde_json::json!({"favourites": fav_channels}))
+}
 }
 
 async fn toggle_favourite(
@@ -801,27 +806,27 @@ async fn search_channels(
     let query = params.get("q").map(|s| s.to_lowercase()).unwrap_or_default();
     let profile_id = params.get("profile_id").and_then(|s| s.parse::<i32>().ok());
     if query.len() < 2 { return Json(serde_json::json!({"results": []})); }
-    let runners = st.runners.read().await;
+    // Snapshot channel data before releasing runners lock to avoid long lock hold
+    let snapshots: Vec<(i32, String, Option<Vec<stalker::Channel>>)> = {
+        let runners = st.runners.read().await;
+        runners.iter()
+            .filter(|r| profile_id.map_or(true, |pid| r.config.id == pid))
+            .map(|r| (r.config.id, r.config.name.clone(), r.channels.try_read().ok().and_then(|g| g.clone())))
+            .collect()
+    };
     let mut results: Vec<serde_json::Value> = Vec::new();
-    for runner in runners.iter() {
-        if let Some(pid) = profile_id { if runner.config.id != pid { continue; } }
-        let channels = runner.channels.read().await;
-        if let Some(chs) = channels.as_ref() {
+    'outer: for (pid, pname, channels) in snapshots {
+        if let Some(chs) = channels {
             for ch in chs.iter() {
                 if ch.title.to_lowercase().contains(&query) || ch.genre.to_lowercase().contains(&query) {
                     results.push(serde_json::json!({
-                        "profile_id": runner.config.id,
-                        "profile_name": runner.config.name,
-                        "title": ch.title,
-                        "cmd": ch.cmd,
-                        "logo": ch.logo,
-                        "genre": ch.genre,
+                        "profile_id": pid, "profile_name": pname,
+                        "title": ch.title, "cmd": ch.cmd, "logo": ch.logo, "genre": ch.genre,
                     }));
-                    if results.len() >= 200 { break; }
+                    if results.len() >= 200 { break 'outer; }
                 }
             }
         }
-        if results.len() >= 200 { break; }
     }
     Json(serde_json::json!({"results": results, "count": results.len()}))
 }
