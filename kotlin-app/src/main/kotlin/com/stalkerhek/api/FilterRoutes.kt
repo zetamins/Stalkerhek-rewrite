@@ -9,8 +9,7 @@ import io.ktor.server.application.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
 import kotlinx.serialization.encodeToString
 
 fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, filterStore: FilterStore, rustEngine: RustEngineClient) {
@@ -108,7 +107,7 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
         val filter = filterStore.get(pid)
         val newDisabled = if (disabled) filter.disabledGenres + (gid to true) else filter.disabledGenres - gid
         filterStore.set(pid, filter.copy(disabledGenres = newDisabled))
-        GlobalScope.launch { rustEngine.filterUpdate(pid, "toggle_genre", genreId = gid, disabled = disabled) }
+        CoroutineScope(Dispatchers.IO).launch { rustEngine.filterUpdate(pid, "toggle_genre", genreId = gid, disabled = disabled) }
         call.respondText("""{"ok":true}""", ContentType.Application.Json)
     }
 
@@ -122,7 +121,7 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
         val newDisabled = if (disabled) filter.disabledChannels + (cmd to true) else filter.disabledChannels - cmd
         val newEnabled = if (disabled) filter.enabledChannels - cmd else filter.enabledChannels + (cmd to true)
         filterStore.set(pid, filter.copy(disabledChannels = newDisabled, enabledChannels = newEnabled))
-        GlobalScope.launch { rustEngine.filterUpdate(pid, "toggle_channel", cmd = cmd, disabled = disabled) }
+        CoroutineScope(Dispatchers.IO).launch { rustEngine.filterUpdate(pid, "toggle_channel", cmd = cmd, disabled = disabled) }
         call.respondText("""{"ok":true}""", ContentType.Application.Json)
     }
 
@@ -131,7 +130,7 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
         val pid = call.receiveParameters()["id"]?.toIntOrNull()
         if (pid != null) {
             filterStore.reset(pid)
-            GlobalScope.launch { rustEngine.filterUpdate(pid, "reset") }
+            CoroutineScope(Dispatchers.IO).launch { rustEngine.filterUpdate(pid, "reset") }
         }
         call.respondText("""{"ok":true}""", ContentType.Application.Json)
     }
@@ -187,7 +186,7 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
         )
         filterStore.set(pid, updated)
         // Sync rename rules to Rust engine
-        GlobalScope.launch {
+        CoroutineScope(Dispatchers.IO).launch {
             rustEngine.filterUpdate(pid, "rename", renamePrefix = updated.renamePrefix, renameSuffix = updated.renameSuffix)
         }
         call.respondText("""{"ok":true}""", ContentType.Application.Json)
@@ -216,7 +215,7 @@ fun Routing.filterRoutes(profileService: ProfileService, authStore: AuthStore, f
         )
         filterStore.set(pid, updated)
         // Sync to Rust engine
-        GlobalScope.launch {
+        CoroutineScope(Dispatchers.IO).launch {
             rustEngine.filterUpdate(pid, "rename_genre", genreRenameId = gid, genreRenameName = name.ifEmpty { null })
         }
         call.respondText("""{"ok":true}""", ContentType.Application.Json)

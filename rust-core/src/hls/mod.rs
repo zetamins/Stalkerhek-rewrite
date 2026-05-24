@@ -28,6 +28,9 @@ pub struct HlsState {
     pub mac: String,
     pub timezone: String,
     pub model: String,
+    /// Shared HTTP client for stream proxying (no auto-redirect, 300s timeout).
+    /// reqwest::Client is cheap to clone (Arc internally) so all handlers share one pool.
+    pub stream_client: reqwest::Client,
 }
 
 #[derive(Clone)]
@@ -52,6 +55,12 @@ pub fn build_router(
         ChannelState { info: ch }
     }).collect();
 
+    let stream_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default();
+
     let state = HlsState {
         channels: Arc::new(RwLock::new(channel_states)),
         channel_map: Arc::new(RwLock::new(channel_map)),
@@ -63,6 +72,7 @@ pub fn build_router(
         mac,
         timezone,
         model,
+        stream_client,
     };
 
     Router::new()
@@ -159,6 +169,7 @@ async fn channel_handler(
     let result = proxy_request(
         &target_url, &scheme, &host, &title, &cmd, !suffix.is_empty(),
         &current_token, &st.serial_number, &st.mac, &st.timezone, &st.model,
+        &st.stream_client,
     ).await;
 
     // On 458 (Cloudflare ban) for initial playlist, retry with fresh channel data
@@ -289,9 +300,14 @@ async fn refresh_and_retry(
     let new_url = new_states[ni].info.stream_url().to_string();
     let new_cmd = new_states[ni].info.cmd.clone();
 
-    // Update cached channels so subsequent requests benefit too
-    *st.channels.write().await = new_states;
-    *st.channel_map.write().await = new_map;
+    // Update cached channels and map atomically: acquire both write locks before
+    // writing either, so no concurrent request sees a new channel vec with the old map.
+    {
+        let mut ch_guard = st.channels.write().await;
+        let mut map_guard = st.channel_map.write().await;
+        *ch_guard = new_states;
+        *map_guard = new_map;
+    }
 
     // Read the freshest token from portal_client (may have changed during get_channels)
     // and update the shared token so all subsequent requests use it immediately.
@@ -308,6 +324,7 @@ async fn refresh_and_retry(
     proxy_request(
         &new_target, scheme, host, title, &new_cmd, !suffix.is_empty(),
         &fresh_token, &st.serial_number, &st.mac, &st.timezone, &st.model,
+        &st.stream_client,
     ).await
 }
 
@@ -325,6 +342,7 @@ fn get_hls_root_for_url(url: &str) -> String {
 async fn proxy_request(
     url: &str, scheme: &str, host: &str, title: &str, _cmd: &str, is_suffix: bool,
     token: &str, serial_number: &str, mac: &str, timezone: &str, model: &str,
+    shared_client: &reqwest::Client,
 ) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
     // Resolve stream hostname via European DNS to bypass geo-blocking
     let parsed_url = url::Url::parse(url)?;
@@ -332,20 +350,21 @@ async fn proxy_request(
     let stream_port = parsed_url.port_or_known_default().unwrap_or(443);
     let eur_ips = dns::resolve_european(&stream_host).await;
 
-    let mut client_builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        // Disable auto-redirect — we follow manually to preserve all
-        // headers (Authorization, Cookie) across cross-origin hops,
-        // since reqwest strips Authorization on cross-origin redirects.
-        .redirect(reqwest::redirect::Policy::none());
-
-    // Pin only the first resolved IP (multiple resolve entries can cause hangs)
+    // If DNS resolved a specific IP, build a pinned client; otherwise use the shared one.
+    // This avoids creating a new client (with its connection pool) on every request.
+    let client;
+    let client_ref: &reqwest::Client;
     if !eur_ips.is_empty() {
         tracing::info!("[HLS] European DNS for {}: {:?}", stream_host, eur_ips);
-        client_builder = client_builder.resolve(&stream_host, SocketAddr::new(eur_ips[0], stream_port));
+        client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve(&stream_host, SocketAddr::new(eur_ips[0], stream_port))
+            .build()?;
+        client_ref = &client;
+    } else {
+        client_ref = shared_client;
     }
-
-    let client = client_builder.build()?;
 
     // Follow redirect chain manually, preserving all headers on every hop.
     // Stream URLs often redirect through CDN/storage server chains and
@@ -353,7 +372,7 @@ async fn proxy_request(
     let mut current_url = url.to_string();
     let max_redirects = 200;
     for hop in 0..=max_redirects {
-        let req = client.get(&current_url);
+        let req = client_ref.get(&current_url);
         let req = crate::mag::apply_mag_headers(req, token, serial_number, mac, timezone, model);
         tracing::info!("[HLS] fetch (hop {}/{}): {}", hop, max_redirects, current_url);
         let resp = req.send().await?;
@@ -437,6 +456,7 @@ fn rewrite_m3u8(content: &str, scheme: &str, host: &str, title: &str) -> String 
             if let Some(start) = line.find("URI=\"") {
                 if let Some(end) = line[start + 5..].find('"') {
                     let uri = &line[start + 5..start + 5 + end];
+                    let uri = uri.trim_start_matches('/');
                     out.push_str(&format!("{}URI=\"{}/{}\"{}", &line[..start], prefix, uri, &line[start + 5 + end + 1..]));
                     out.push('\n');
                     continue;
@@ -445,7 +465,8 @@ fn rewrite_m3u8(content: &str, scheme: &str, host: &str, title: &str) -> String 
             out.push_str(line);
             out.push('\n');
         } else {
-            out.push_str(&format!("{}/{}", prefix, line.trim()));
+            let segment = line.trim().trim_start_matches('/');
+            out.push_str(&format!("{}/{}", prefix, segment));
             out.push('\n');
         }
     }
@@ -464,19 +485,26 @@ fn url_encode(s: &str) -> String {
 }
 
 fn url_decode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut bytes: Vec<u8> = Vec::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         if c == '%' {
             let hex: String = chars.by_ref().take(2).collect();
             if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                out.push(byte as char);
+                bytes.push(byte);
+            } else {
+                // Invalid escape — pass through literally
+                bytes.push(b'%');
+                bytes.extend_from_slice(hex.as_bytes());
             }
+        } else if c == '+' {
+            bytes.push(b' ');
         } else {
-            out.push(c);
+            let mut buf = [0u8; 4];
+            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
         }
     }
-    out
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn scheme_from_request(req: &Request<Body>) -> String {

@@ -17,6 +17,9 @@ class ProfileService(
     private val profileStatuses = ConcurrentHashMap<Int, ProfileStatus>()
     private val busyStatus = ConcurrentHashMap<Int, Boolean>()
     private val channelCache = ConcurrentHashMap<Int, List<ChannelInfo>>()
+    // Supervised scope for fire-and-forget calls to the Rust engine.
+    // Uses SupervisorJob so a failed child doesn't cancel siblings.
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun listProfiles(): List<Profile> = profileStore.list()
 
@@ -43,7 +46,7 @@ class ProfileService(
         channelCache.remove(id)
         logService.append(id, "Profile deleted")
         logService.appendInstance("Profile #$id deleted")
-        GlobalScope.launch { rustEngine.deleteProfile(id) }
+        serviceScope.launch { rustEngine.deleteProfile(id) }
         return true
     }
 
@@ -93,7 +96,9 @@ class ProfileService(
                     watchdog_interval = profile.watchdogInterval,
                 )
 
-                // Upsert profile config into Rust engine, then start it
+                // Upsert profile config into Rust engine and start it.
+                // The Rust start endpoint reads the profile from its own store,
+                // so we must create/update it there first.
                 rustEngine.createProfile(rustCfg)
                 val result = rustEngine.startProfile(rustCfg)
                 result.fold(
@@ -108,7 +113,7 @@ class ProfileService(
                             proxy = ":${profile.proxyPort}",
                             running = true,
                         )
-                        GlobalScope.launch {
+                        serviceScope.launch {
                             val channels = rustEngine.getChannels(id)
                             channelCache[id] = channels
                         }
@@ -138,7 +143,7 @@ class ProfileService(
             ?: ProfileStatus(id = id, phase = "idle", message = "Stopped")
         logService.append(id, "Stopped")
         logService.appendInstance("Profile #$id stopped")
-        GlobalScope.launch { rustEngine.stopProfile(id) }
+        serviceScope.launch { rustEngine.stopProfile(id) }
     }
 
     fun listStatuses(): List<ProfileStatus> {

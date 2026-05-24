@@ -117,6 +117,8 @@ impl FilterStore {
         self.disabled_genres.remove(&profile_id);
         self.disabled_channels.remove(&profile_id);
         self.enabled_channels.remove(&profile_id);
+        self.rename_prefix.remove(&profile_id);
+        self.rename_suffix.remove(&profile_id);
         self.genre_renames.remove(&profile_id);
         *self.versions.entry(profile_id).or_insert(0) += 1;
     }

@@ -143,7 +143,7 @@ fun Routing.profileRoutes(profileService: ProfileService, authStore: AuthStore, 
     post("/api/profiles/start") {
         if (!auth(call)) { call.respondText("""{"error":"unauthorized"}""", ContentType.Application.Json, HttpStatusCode.Unauthorized); return@post }
         val id = call.receiveParameters()["id"]?.toIntOrNull() ?: return@post call.respondText("id required", status = HttpStatusCode.BadRequest)
-        GlobalScope.launch { profileService.startProfile(id) }
+        CoroutineScope(Dispatchers.IO).launch { profileService.startProfile(id) }
         call.respondText("""{"ok":true}""", ContentType.Application.Json)
     }
 
@@ -151,7 +151,7 @@ fun Routing.profileRoutes(profileService: ProfileService, authStore: AuthStore, 
     post("/profiles/start") {
         if (!auth(call)) { call.respondRedirect("/login"); return@post }
         val id = call.receiveParameters()["id"]?.toIntOrNull()
-        if (id != null) GlobalScope.launch { profileService.startProfile(id) }
+        if (id != null) CoroutineScope(Dispatchers.IO).launch { profileService.startProfile(id) }
         call.respondRedirect("/dashboard")
     }
 
