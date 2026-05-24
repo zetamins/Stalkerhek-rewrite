@@ -327,8 +327,11 @@ pub async fn start_profile_by_id(
                         break;
                     }
                     _ = tokio::time::sleep(tokio::time::Duration::from_secs(watchdog_interval as u64 * 60)) => {
-                        let client = watchdog_portal.read().await;
-                        if let Err(e) = client.watchdog_update().await {
+                        // Clone a lightweight snapshot outside the lock so we don't hold
+                        // a read lock across the network await, which would block any
+                        // concurrent write (e.g. 458 channel refresh) for the full HTTP RTT.
+                        let watchdog_client = watchdog_portal.read().await.clone_for_watchdog();
+                        if let Err(e) = watchdog_client.watchdog_update().await {
                             tracing::warn!("Watchdog update failed for profile {profile_id}: {e}");
                         }
                     }

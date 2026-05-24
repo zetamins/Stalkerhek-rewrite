@@ -291,6 +291,9 @@ async fn refresh_and_retry(
     *st.channels.write().await = new_states;
     *st.channel_map.write().await = new_map;
 
+    // Read the freshest token from portal_client (may have changed during get_channels)
+    let fresh_token = st.portal_client.read().await.token.clone();
+
     let new_target = if suffix.is_empty() {
         new_url
     } else {
@@ -300,7 +303,7 @@ async fn refresh_and_retry(
     tracing::info!("[HLS] retrying {} with fresh token", title);
     proxy_request(
         &new_target, scheme, host, title, &new_cmd, !suffix.is_empty(),
-        &st.token, &st.serial_number, &st.mac, &st.timezone, &st.model,
+        &fresh_token, &st.serial_number, &st.mac, &st.timezone, &st.model,
     ).await
 }
 

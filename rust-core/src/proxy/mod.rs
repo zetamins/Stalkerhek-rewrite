@@ -393,6 +393,7 @@ async fn proxy_handler(
         proxy_req = crate::mag::apply_mag_headers(
             proxy_req, &st.token, &st.serial_number, &st.mac, &st.timezone, &st.model,
         );
+        let referer_host = match current_url.splitn(2, "://").nth(1).and_then(|r| r.split('/').next()) {
             Some(h) => format!("{}://{}/", if current_url.starts_with("https") { "https" } else { "http" }, h),
             None => format!("{}/", st.portal_base.trim_end_matches('/')),
         };
@@ -508,10 +509,11 @@ async fn proxy_handler(
 }
 
 fn generate_create_link_response(stream_url: &str, id: &str, ch_id: &str) -> String {
+    let link_id = ch_id.parse::<u64>().unwrap_or(0);
     let escaped = stream_url.replace('/', "\\/");
     format!(
         r#"{{"js":{{"id":"{}","cmd":"{}","streamer_id":0,"link_id":{},"load":0,"error":""}},"text":""}}"#,
-        id, escaped, ch_id
+        id, escaped, link_id
     )
 }
 
@@ -520,12 +522,18 @@ fn generate_create_link_response(stream_url: &str, id: &str, ch_id: &str) -> Str
 async fn proxy_refresh_and_retry(
     st: &ProxyState, query: &ProxyQuery, headers: &HeaderMap, _original_url: &str, client: &reqwest::Client,
 ) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
-    // Re-fetch channels to get fresh play_tokens.
+    // Re-authenticate and re-fetch channels to get a fresh token and play_tokens.
     // Release the write lock immediately after the network call so concurrent
     // STB requests are not blocked for the duration of the HTTP round-trip.
-    let fresh = {
-        let client_lock = st.portal_client.write().await;
-        client_lock.get_channels().await?
+    let (fresh, fresh_token) = {
+        let mut client_lock = st.portal_client.write().await;
+        // Re-authenticate first to ensure token is valid
+        if let Err(e) = client_lock.authenticate().await {
+            tracing::warn!("[PROXY] re-auth failed during 458 retry: {e}");
+        }
+        let channels = client_lock.get_channels().await?;
+        let token = client_lock.token.clone();
+        (channels, token)
     };
 
     // Find matching channel cmd in fresh data
@@ -560,7 +568,7 @@ async fn proxy_refresh_and_retry(
         }
     }
     proxy_req = crate::mag::apply_mag_headers(
-        proxy_req, &st.token, &st.serial_number, &st.mac, &st.timezone, &st.model,
+        proxy_req, &fresh_token, &st.serial_number, &st.mac, &st.timezone, &st.model,
     );
     let referer_host = st.portal_base.trim_end_matches('/');
     proxy_req = proxy_req.header("Referer", format!("{}/", referer_host))

@@ -20,8 +20,6 @@ fun Routing.authRoutes(authStore: AuthStore) {
     val authEnabled = System.getenv("STALKERHEK_DISABLE_AUTH") != "1"
     val allowRegistration = System.getenv("STALKERHEK_ALLOW_REGISTER") == "1"
 
-    fun getSessionUsername(call: ApplicationCall) = getSessionUsername(call)
-
     fun checkAuth(call: ApplicationCall) = checkAuth(call, authEnabled, authStore)
 
     // Public pages

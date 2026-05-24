@@ -3,6 +3,43 @@ use std::net::SocketAddr;
 
 use crate::dns;
 
+/// Lightweight snapshot of PortalClient fields needed to send a watchdog ping.
+/// Cloned out of the RwLock so the watchdog task does not hold the lock during the HTTP await.
+pub struct WatchdogClient {
+    pub base_url: String,
+    pub token: String,
+    pub serial_number: String,
+    pub mac: String,
+    pub timezone: String,
+    pub model: String,
+    client: reqwest::Client,
+}
+
+impl WatchdogClient {
+    pub async fn watchdog_update(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!(
+            "{}?action=get_events&event_active_id=0&init=0&type=watchdog&cur_play_type=1&JsHttpRequest=1-xml",
+            self.base_url
+        );
+        use reqwest::header::*;
+        let mut h = HeaderMap::new();
+        h.insert(ACCEPT, HeaderValue::from_static("*/*"));
+        h.insert("Cache-Control", HeaderValue::from_static("no-cache"));
+        h.insert("X-User-Agent", HeaderValue::from_str(&format!("Model: {}; Link: Ethernet", self.model)).unwrap());
+        if !self.token.is_empty() {
+            h.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", self.token)).unwrap());
+        }
+        let cookie = format!(
+            "PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};",
+            urlencoding(&self.serial_number), urlencoding(&self.mac), urlencoding(&self.timezone),
+        );
+        h.insert(COOKIE, HeaderValue::from_str(&cookie).unwrap());
+        let resp = self.client.get(&url).headers(h).send().await?;
+        let _ = resp.text().await?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
     pub title: String,
@@ -340,6 +377,20 @@ impl PortalClient {
             .await?;
         let _ = resp.text().await?;
         Ok(())
+    }
+
+    /// Produce a lightweight clone that can send the watchdog ping without
+    /// holding the RwLock across an async network await.
+    pub fn clone_for_watchdog(&self) -> WatchdogClient {
+        WatchdogClient {
+            base_url: self.base_url.clone(),
+            token: self.token.clone(),
+            serial_number: self.serial_number.clone(),
+            mac: self.mac.clone(),
+            timezone: self.timezone.clone(),
+            model: self.model.clone(),
+            client: self.client.clone(),
+        }
     }
 
     #[allow(dead_code)]
