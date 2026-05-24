@@ -1,9 +1,9 @@
 use axum::{
     body::Body,
     extract::{Query, State},
-    http::{HeaderMap, StatusCode, Uri},
+    http::{HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{any, get},
     Router,
 };
 use serde_json;
@@ -107,8 +107,8 @@ pub fn build_router(
     };
 
     Router::new()
-        .route("/", get(proxy_handler))
-        .route("/*path", get(proxy_handler))
+        .route("/", any(proxy_handler))
+        .route("/*path", any(proxy_handler))
         .with_state(state)
 }
 
@@ -127,9 +127,11 @@ struct ProxyQuery {
 
 async fn proxy_handler(
     State(st): State<ProxyState>,
+    method: Method,
     headers: HeaderMap,
     uri: Uri,
     query: Query<ProxyQuery>,
+    body: axum::body::Bytes,
 ) -> Response {
     tracing::info!("[PROXY] {} — action={:?} type={:?} cmd={:?}", uri, query.action, query.r#type, query.cmd);
     if let Some(action) = &query.action {
@@ -168,6 +170,20 @@ async fn proxy_handler(
                     .body(Body::from(
                         r#"{"js":true,"text":"Authenticated"}"#,
                     ))
+                    .unwrap();
+            }
+            "get_profile" => {
+                // Return a minimal valid profile so the STB proceeds to channel loading.
+                // Without this the STB stalls waiting for profile fields it never gets.
+                let tok = st.token.read().await.clone();
+                return Response::builder()
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"js":{{"id":"1","name":"IPTV","status":"1","msg":"","token":"{}","logo":"","fname":"User","set_diff_url":0,"stb_type":"{}","provider_id":"1","tariff_expired_date":"","created":"2020-01-01 00:00:00","blocked":"0","block_msg":null,"updated":"2020-01-01 00:00:00","now":"{}","timeslot":1,"timeslot_tv":0,"video_out":"HDMI","en_additional_services_on":"1","hdmi_event_enabled":"0"}},"text":"loaded profile in: 0.01s"}}"#,
+                        tok,
+                        st.model,
+                        chrono_now_str(),
+                    )))
                     .unwrap();
             }
             "logout" => {
@@ -298,38 +314,49 @@ async fn proxy_handler(
         }
     }
 
-    // Build proxy request to real portal — preserve all original params including captured ones
-    let mut query_params = query.extra.clone();
-    if let Some(ref v) = query.r#type { query_params.insert("type".to_string(), v.clone()); }
-    if let Some(ref v) = query.action { query_params.insert("action".to_string(), v.clone()); }
-    if let Some(ref v) = query.cmd { query_params.insert("cmd".to_string(), v.clone()); }
+    // Build proxy request to real portal — preserve all original params with stable ordering.
+    // Stalker middleware validates that type comes before action in the query string.
+    // Use a Vec to guarantee order: type, action, cmd, then everything else.
+    let is_post = method == Method::POST;
+    let mut query_params: Vec<(String, String)> = Vec::new();
 
-    // Rewrite device identifiers if present in the original request
+    // Always put type first, then action, then cmd — Stalker middleware is order-sensitive
+    if let Some(ref v) = query.r#type  { query_params.push(("type".to_string(),   v.clone())); }
+    if let Some(ref v) = query.action  { query_params.push(("action".to_string(), v.clone())); }
+    if let Some(ref v) = query.cmd     { query_params.push(("cmd".to_string(),    v.clone())); }
+
+    // Device identity rewriting
     if query.sn.is_some() {
-        query_params.insert("sn".to_string(), st.serial_number.clone());
+        query_params.push(("sn".to_string(), st.serial_number.clone()));
     }
     if query.device_id.is_some() {
-        query_params.insert("device_id".to_string(), st.device_id.clone());
+        query_params.push(("device_id".to_string(), st.device_id.clone()));
     }
     if query.device_id2.is_some() {
-        query_params.insert("device_id2".to_string(), st.device_id2.clone());
+        query_params.push(("device_id2".to_string(), st.device_id2.clone()));
     }
     if query.signature.is_some() {
-        query_params.insert("signature".to_string(), "f".repeat(64));
+        query_params.push(("signature".to_string(), "f".repeat(64)));
     }
 
-    // Rewrite metrics JSON parameter — the MAG sends its real MAC/serial in a JSON string
+    // Metrics MAC/serial rewriting
+    let mut metrics_rewritten = false;
     if let Some(metrics_val) = query.extra.get("metrics") {
         if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(metrics_val) {
             if let Some(obj) = v.as_object_mut() {
-                if obj.contains_key("mac") {
-                    obj.insert("mac".to_string(), serde_json::Value::String(st.mac.clone()));
-                }
-                if obj.contains_key("sn") {
-                    obj.insert("sn".to_string(), serde_json::Value::String(st.serial_number.clone()));
-                }
-                query_params.insert("metrics".to_string(), v.to_string());
+                if obj.contains_key("mac") { obj.insert("mac".to_string(), serde_json::Value::String(st.mac.clone())); }
+                if obj.contains_key("sn")  { obj.insert("sn".to_string(),  serde_json::Value::String(st.serial_number.clone())); }
+                query_params.push(("metrics".to_string(), v.to_string()));
+                metrics_rewritten = true;
             }
+        }
+    }
+
+    // Append remaining extra params (excluding ones already handled)
+    let handled = ["type", "action", "cmd", "sn", "device_id", "device_id2", "signature", "metrics"];
+    for (k, v) in &query.extra {
+        if !handled.contains(&k.as_str()) && !(k == "metrics" && metrics_rewritten) {
+            query_params.push((k.clone(), v.clone()));
         }
     }
 
@@ -396,7 +423,12 @@ async fn proxy_handler(
     let mut is_458 = false;
 
     for hop in 0..=max_redirects {
-        let mut proxy_req = client.get(&current_url);
+        let proxy_req = if is_post && hop == 0 {
+            client.post(&current_url).body(body.clone())
+        } else {
+            client.get(&current_url).body(axum::body::Bytes::new())
+        };
+        let mut proxy_req = proxy_req;
 
         // Forward client headers (same filtering as before)
         for (key, val) in headers.iter() {
@@ -725,4 +757,20 @@ fn url_encode(s: &str) -> String {
         }
     }
     out
+}
+
+fn chrono_now_str() -> String {
+    // Simple UTC timestamp without chrono dependency
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let days = secs / 86400;
+    // Rough date calculation from epoch (good enough for STB "now" field)
+    let y = 1970 + days / 365;
+    let d = (days % 365) + 1;
+    let mo = (d / 30).min(11) + 1;
+    let dy = (d % 30) + 1;
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, mo, dy, h, m, s)
 }
