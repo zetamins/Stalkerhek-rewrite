@@ -103,14 +103,22 @@ class ProfileService(
                 val result = rustEngine.startProfile(rustCfg)
                 result.fold(
                     onSuccess = { startResp ->
+                        // Use the ports returned directly in the start response.
+                        // Fall back to a status query only if they're missing (shouldn't happen).
+                        val hlsAddr = startResp.hlsAddr.takeIf { it.isNotEmpty() }
+                            ?: rustEngine.getProfileStatus(id)?.hlsAddr
+                            ?: ":${profile.hlsPort}"
+                        val proxyAddr = startResp.proxyAddr.takeIf { it.isNotEmpty() }
+                            ?: rustEngine.getProfileStatus(id)?.proxyAddr
+                            ?: ":${profile.proxyPort}"
                         profileStatuses[id] = ProfileStatus(
                             id = id,
                             name = profile.name,
                             phase = "success",
                             message = "Running",
                             channels = startResp.channels,
-                            hls = ":${profile.hlsPort}",
-                            proxy = ":${profile.proxyPort}",
+                            hls = hlsAddr,
+                            proxy = proxyAddr,
                             running = true,
                         )
                         serviceScope.launch {

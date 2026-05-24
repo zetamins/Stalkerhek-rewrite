@@ -474,6 +474,8 @@ pub async fn start_profile_by_id(
         "ok": true,
         "id": id,
         "channels": channel_count,
+        "hls_addr": format!(":{}", profile.hls_port),
+        "proxy_addr": format!(":{}", profile.proxy_port),
     }))
 }
 
