@@ -24,11 +24,11 @@ pub struct ProxyState {
     pub portal_base: String,
     pub portal_root: String,
     pub portal_root_path: String,
-    pub channels: Arc<HashMap<String, stalker::Channel>>,
+    pub channels: Arc<RwLock<HashMap<String, stalker::Channel>>>,
     pub filter: Arc<RwLock<FilterStore>>,
     pub profile_id: i32,
     pub proxy_rewrite: bool,
-    pub token: String,
+    pub token: Arc<RwLock<String>>,
     pub serial_number: String,
     pub mac: String,
     pub timezone: String,
@@ -39,6 +39,8 @@ pub struct ProxyState {
     pub vod_categories: Vec<serde_json::Value>,
     pub series_categories: Vec<serde_json::Value>,
     pub portal_client: Arc<RwLock<stalker::PortalClient>>,
+    /// Shared HTTP client for portal API proxying (no auto-redirect, 300s timeout).
+    pub portal_http_client: reqwest::Client,
 }
 
 pub fn build_router(
@@ -82,11 +84,11 @@ pub fn build_router(
         portal_base,
         portal_root,
         portal_root_path,
-        channels: Arc::new(channel_map),
+        channels: Arc::new(RwLock::new(channel_map)),
         filter,
         profile_id,
         proxy_rewrite,
-        token,
+        token: Arc::new(RwLock::new(token)),
         serial_number,
         mac,
         timezone,
@@ -97,6 +99,11 @@ pub fn build_router(
         vod_categories,
         series_categories,
         portal_client,
+        portal_http_client: reqwest::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or_default(),
     };
 
     Router::new()
@@ -128,11 +135,12 @@ async fn proxy_handler(
     if let Some(action) = &query.action {
         match action.as_str() {
             "handshake" => {
+                let tok = st.token.read().await.clone();
                 return Response::builder()
                     .header("Content-Type", "application/json")
                     .body(Body::from(format!(
                         r#"{{"js":{{"token":"{}","random":"b8c4ef93de04e675350605eb0086bffe51507b88e6a1662e71fe9372"}},"text":"generated in: 0.01s"}}"#,
-                        st.token
+                        tok
                     )))
                     .unwrap();
             }
@@ -176,7 +184,8 @@ async fn proxy_handler(
                 // returns 520. The STB JS uses this to populate stb.player.channels.
                 // Apply filter so stb.player.channels matches what the portal should show.
                 let filter = st.filter.read().await;
-                let data: Vec<serde_json::Value> = st.channels.values()
+                let channels_guard = st.channels.read().await;
+                let data: Vec<serde_json::Value> = channels_guard.values()
                     .filter(|ch| filter.is_channel_allowed(st.profile_id, &ch.cmd, &ch.genre_id))
                     .map(|ch| {
                         serde_json::json!({
@@ -263,7 +272,11 @@ async fn proxy_handler(
                     .and_then(|h| h.split(':').next())
                     .unwrap_or("localhost");
                 if let Some(cmd) = &query.cmd {
-                    if let Some(channel) = st.channels.get(cmd) {
+                    let channel_data = {
+                        let ch_guard = st.channels.read().await;
+                        ch_guard.get(cmd.as_str()).cloned()
+                    };
+                    if let Some(channel) = channel_data {
                         let allowed = {
                             let filter = st.filter.read().await;
                             filter.is_channel_allowed(st.profile_id, &channel.cmd, &channel.genre_id)
@@ -353,19 +366,28 @@ async fn proxy_handler(
     let stream_port = parsed_url.port_or_known_default().unwrap_or(443);
     let eur_ips = dns::resolve_european(&stream_host).await;
 
-    let mut client_builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(300))
-        .redirect(reqwest::redirect::Policy::none());
-
+    // Reuse the shared client when no DNS pinning is needed; build a pinned
+    // one only when European DNS resolved a specific IP.
+    let pinned_client;
+    let client: &reqwest::Client;
     if !eur_ips.is_empty() {
         tracing::info!("[PROXY] European DNS for {}: {:?}", stream_host, eur_ips);
-        client_builder = client_builder.resolve(&stream_host, SocketAddr::new(eur_ips[0], stream_port));
+        match reqwest::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve(&stream_host, SocketAddr::new(eur_ips[0], stream_port))
+            .build()
+        {
+            Ok(c) => { pinned_client = Some(c); client = pinned_client.as_ref().unwrap(); }
+            Err(_) => { pinned_client = None; client = &st.portal_http_client; }
+        }
+    } else {
+        pinned_client = None;
+        client = &st.portal_http_client;
     }
 
-    let client = match client_builder.build() {
-        Ok(c) => c,
-        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
-    };
+    // Read token once for this request
+    let current_token = st.token.read().await.clone();
 
     // Manual redirect loop — preserve all headers (Authorization, Cookie) on every hop
     let mut current_url = final_url;
@@ -391,7 +413,7 @@ async fn proxy_handler(
 
         // Apply MAG headers
         proxy_req = crate::mag::apply_mag_headers(
-            proxy_req, &st.token, &st.serial_number, &st.mac, &st.timezone, &st.model,
+            proxy_req, &current_token, &st.serial_number, &st.mac, &st.timezone, &st.model,
         );
         let referer_host = match current_url.splitn(2, "://").nth(1).and_then(|r| r.split('/').next()) {
             Some(h) => format!("{}://{}/", if current_url.starts_with("https") { "https" } else { "http" }, h),
@@ -510,7 +532,14 @@ async fn proxy_handler(
 
 fn generate_create_link_response(stream_url: &str, id: &str, ch_id: &str) -> String {
     let link_id = ch_id.parse::<u64>().unwrap_or(0);
-    let escaped = stream_url.replace('/', "\\/");
+    // Only escape slashes after the scheme — the STB JS calls JSON.parse() on this
+    // and then does its own URL handling. Escaping "://" breaks protocol parsing.
+    let escaped = if let Some(rest) = stream_url.find("://").map(|i| i + 3).and_then(|i| Some((i, stream_url))) {
+        let (after_scheme, s) = rest;
+        format!("{}{}", &s[..after_scheme], &s[after_scheme..].replace('/', "\\/"))
+    } else {
+        stream_url.replace('/', "\\/")
+    };
     format!(
         r#"{{"js":{{"id":"{}","cmd":"{}","streamer_id":0,"link_id":{},"load":0,"error":""}},"text":""}}"#,
         id, escaped, link_id
@@ -527,7 +556,6 @@ async fn proxy_refresh_and_retry(
     // STB requests are not blocked for the duration of the HTTP round-trip.
     let (fresh, fresh_token) = {
         let mut client_lock = st.portal_client.write().await;
-        // Re-authenticate first to ensure token is valid
         if let Err(e) = client_lock.authenticate().await {
             tracing::warn!("[PROXY] re-auth failed during 458 retry: {e}");
         }
@@ -535,6 +563,16 @@ async fn proxy_refresh_and_retry(
         let token = client_lock.token.clone();
         (channels, token)
     };
+
+    // Update token and channel map so all subsequent requests use fresh data
+    *st.token.write().await = fresh_token.clone();
+    {
+        let mut ch_guard = st.channels.write().await;
+        ch_guard.clear();
+        for ch in &fresh {
+            ch_guard.insert(ch.cmd.clone(), ch.clone());
+        }
+    }
 
     // Find matching channel cmd in fresh data
     let cmd = query.cmd.as_deref().unwrap_or("");

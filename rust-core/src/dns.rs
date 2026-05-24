@@ -21,6 +21,13 @@ static TZ_CACHE: std::sync::LazyLock<Mutex<HashMap<String, TzEntry>>> = std::syn
     Mutex::new(HashMap::new())
 });
 
+static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("Failed to build DNS HTTP client")
+});
+
 /// Resolve a hostname via Google DoH with an EDNS Client Subnet hint
 /// pointing to a European IP range. This causes the authoritative DNS
 /// to return European CDN/Cloudflare edge IPs.
@@ -60,10 +67,7 @@ pub async fn resolve_european(hostname: &str) -> Vec<IpAddr> {
 }
 
 async fn resolve_doh(url: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()?;
-    let resp = client.get(url)
+    let resp = HTTP_CLIENT.get(url)
         .header("Accept", "application/dns-json")
         .send()
         .await?;
@@ -97,15 +101,7 @@ pub async fn get_european_timezone(hostname: &str) -> String {
     // geolocate to their datacenter (e.g. Toronto) rather than the origin.
     // Instead, geolocate a known European IP from the ECS subnet (Deutsche Telekom).
     let url = "http://ip-api.com/json/85.214.0.1?fields=timezone".to_string();
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return "Europe/London".to_string(),
-    };
-
-    let tz = match client.get(&url).send().await {
+    let tz = match HTTP_CLIENT.get(&url).send().await {
         Ok(resp) => {
             if let Ok(data) = resp.json::<serde_json::Value>().await {
                 data["timezone"].as_str().unwrap_or("Europe/London").to_string()
