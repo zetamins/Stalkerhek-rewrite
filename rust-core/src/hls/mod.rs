@@ -55,11 +55,14 @@ pub fn build_router(
         ChannelState { info: ch }
     }).collect();
 
-    let stream_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap_or_default();
+    let stream_client = {
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none());
+        
+        builder = stalker::PortalClient::configure_stealth_client(builder);
+        builder.build().unwrap_or_default()
+    };
 
     let state = HlsState {
         channels: Arc::new(RwLock::new(channel_states)),
@@ -222,6 +225,9 @@ async fn epg_handler(
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
         .redirect(reqwest::redirect::Policy::none());
+    
+    builder = stalker::PortalClient::configure_stealth_client(builder);
+    
     if !eur_ips.is_empty() {
         builder = builder.resolve(&host, SocketAddr::new(eur_ips[0], port));
     }
@@ -362,11 +368,13 @@ async fn proxy_request(
     let client_ref: &reqwest::Client;
     if !eur_ips.is_empty() {
         tracing::info!("[HLS] European DNS for {}: {:?}", stream_host, eur_ips);
-        client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .redirect(reqwest::redirect::Policy::none())
-            .resolve(&stream_host, SocketAddr::new(eur_ips[0], stream_port))
-            .build()?;
+            .resolve(&stream_host, SocketAddr::new(eur_ips[0], stream_port));
+        
+        builder = stalker::PortalClient::configure_stealth_client(builder);
+        client = builder.build()?;
         client_ref = &client;
     } else {
         client_ref = shared_client;

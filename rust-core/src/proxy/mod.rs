@@ -80,6 +80,21 @@ pub fn build_router(
         None => "/".to_string(),
     };
 
+    let portal_http_client = {
+        let mut builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none());
+        
+        // Apply stealth TLS and socket settings (Methods 1 & 5)
+        builder = builder
+            .use_rustls_tls()
+            .min_tls_version(reqwest::tls::Version::TLS_1_0)
+            .max_tls_version(reqwest::tls::Version::TLS_1_2)
+            .tcp_keepalive(Duration::from_secs(60));
+            
+        builder.build().unwrap_or_default()
+    };
+
     let state = ProxyState {
         portal_base,
         portal_root,
@@ -99,11 +114,7 @@ pub fn build_router(
         vod_categories,
         series_categories,
         portal_client,
-        portal_http_client: reqwest::Client::builder()
-            .timeout(Duration::from_secs(300))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap_or_default(),
+        portal_http_client,
     };
 
     Router::new()
@@ -393,18 +404,18 @@ async fn proxy_handler(
     let stream_port = parsed_url.port_or_known_default().unwrap_or(443);
     let eur_ips = dns::resolve_european(&stream_host).await;
 
-    // Reuse the shared client when no DNS pinning is needed; build a pinned
-    // one only when European DNS resolved a specific IP.
     let pinned_client;
     let client: &reqwest::Client;
     if !eur_ips.is_empty() {
         tracing::info!("[PROXY] European DNS for {}: {:?}", stream_host, eur_ips);
-        match reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(300))
             .redirect(reqwest::redirect::Policy::none())
-            .resolve(&stream_host, SocketAddr::new(eur_ips[0], stream_port))
-            .build()
-        {
+            .resolve(&stream_host, SocketAddr::new(eur_ips[0], stream_port));
+            
+        builder = stalker::PortalClient::configure_stealth_client(builder);
+        
+        match builder.build() {
             Ok(c) => { pinned_client = Some(c); client = pinned_client.as_ref().unwrap(); }
             Err(_) => { pinned_client = None; client = &st.portal_http_client; }
         }

@@ -16,4 +16,9 @@ pub fn apply_mag_headers(
         .header("Accept-Language", "en-US,en;q=0.9")
         .header("Cache-Control", "no-cache")
         .header("Pragma", "no-cache")
+        .header("X-Forwarded-For", "85.214.0.1")
+        .header("X-Real-IP", "85.214.0.1")
+        .header("CF-Connecting-IP", "85.214.0.1")
+        .header("True-Client-IP", "85.214.0.1")
+        .header("X-Originating-IP", "85.214.0.1")
 }

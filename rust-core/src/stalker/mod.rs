@@ -26,6 +26,11 @@ impl WatchdogClient {
         h.insert(ACCEPT, HeaderValue::from_static("*/*"));
         h.insert("Cache-Control", HeaderValue::from_static("no-cache"));
         h.insert("X-User-Agent", HeaderValue::from_str(&format!("Model: {}; Link: Ethernet", self.model)).unwrap());
+        h.insert("X-Forwarded-For", HeaderValue::from_static("85.214.0.1"));
+        h.insert("X-Real-IP", HeaderValue::from_static("85.214.0.1"));
+        h.insert("CF-Connecting-IP", HeaderValue::from_static("85.214.0.1"));
+        h.insert("True-Client-IP", HeaderValue::from_static("85.214.0.1"));
+        h.insert("X-Originating-IP", HeaderValue::from_static("85.214.0.1"));
         if !self.token.is_empty() {
             h.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", self.token)).unwrap());
         }
@@ -82,18 +87,34 @@ pub struct PortalClient {
 }
 
 impl PortalClient {
+    pub fn configure_stealth_client(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+        // Method 1: TLS Fingerprint Spoofing (mimic older OpenSSL/STB stack)
+        // Method 5: Socket-level signature (custom TTL of 64, typical for Linux/STB)
+        // Max Method 5: Enable HTTP/2 and HTTP/3 for modern traffic signature
+        builder
+            .use_rustls_tls() // Ensure consistent TLS stack
+            .min_tls_version(reqwest::tls::Version::TLS_1_0)
+            .max_tls_version(reqwest::tls::Version::TLS_1_2) // Most portals/boxes don't use 1.3 yet
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .http2_prior_knowledge() // Force HTTP/2 if supported
+            .https_only(false)
+    }
+
     pub fn new(
         base_url: String, mac: String, username: String, password: String,
         serial_number: String, device_id: String, device_id2: String,
         signature: String, model: String, timezone: String,
         device_id_auth: bool,
     ) -> Self {
-        let client = reqwest::Client::builder()
+        let ua = format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 2034 Mobile Safari/533.3", model);
+        let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
-            .user_agent("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 4 rev: 2116 Mobile Safari/533.3")
-            .danger_accept_invalid_certs(false)
-            .build()
-            .expect("Failed to build HTTP client");
+            .user_agent(ua)
+            .danger_accept_invalid_certs(false);
+        
+        builder = Self::configure_stealth_client(builder);
+        
+        let client = builder.build().expect("Failed to build HTTP client");
 
         Self {
             base_url, mac, username, password, serial_number, device_id,
@@ -113,10 +134,14 @@ impl PortalClient {
         let port = parsed.port_or_known_default().unwrap_or(443);
         let ips = dns::resolve_european(&host).await;
 
+        let ua = format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 2034 Mobile Safari/533.3", self.model);
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
-            .user_agent("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 4 rev: 2116 Mobile Safari/533.3")
+            .user_agent(ua)
             .danger_accept_invalid_certs(false);
+            
+        builder = Self::configure_stealth_client(builder);
+
         if !ips.is_empty() {
             builder = builder.resolve(&host, SocketAddr::new(ips[0], port));
         }
@@ -133,6 +158,11 @@ impl PortalClient {
         h.insert("Cache-Control", HeaderValue::from_static("no-cache"));
         h.insert("Pragma", HeaderValue::from_static("no-cache"));
         h.insert("X-User-Agent", HeaderValue::from_str(&format!("Model: {}; Link: Ethernet", self.model)).unwrap());
+        h.insert("X-Forwarded-For", HeaderValue::from_static("85.214.0.1"));
+        h.insert("X-Real-IP", HeaderValue::from_static("85.214.0.1"));
+        h.insert("CF-Connecting-IP", HeaderValue::from_static("85.214.0.1"));
+        h.insert("True-Client-IP", HeaderValue::from_static("85.214.0.1"));
+        h.insert("X-Originating-IP", HeaderValue::from_static("85.214.0.1"));
         if !self.token.is_empty() {
             h.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", self.token)).unwrap());
         }
