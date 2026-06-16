@@ -26,11 +26,12 @@ impl WatchdogClient {
         h.insert(ACCEPT, HeaderValue::from_static("*/*"));
         h.insert("Cache-Control", HeaderValue::from_static("no-cache"));
         h.insert("X-User-Agent", HeaderValue::from_str(&format!("Model: {}; Link: Ethernet", self.model)).unwrap());
-        h.insert("X-Forwarded-For", HeaderValue::from_static("85.214.0.1"));
-        h.insert("X-Real-IP", HeaderValue::from_static("85.214.0.1"));
-        h.insert("CF-Connecting-IP", HeaderValue::from_static("85.214.0.1"));
-        h.insert("True-Client-IP", HeaderValue::from_static("85.214.0.1"));
-        h.insert("X-Originating-IP", HeaderValue::from_static("85.214.0.1"));
+        let eur_ip = dns::get_random_european_ip();
+        h.insert("X-Forwarded-For", HeaderValue::from_str(&eur_ip).unwrap());
+        h.insert("X-Real-IP", HeaderValue::from_str(&eur_ip).unwrap());
+        h.insert("CF-Connecting-IP", HeaderValue::from_str(&eur_ip).unwrap());
+        h.insert("True-Client-IP", HeaderValue::from_str(&eur_ip).unwrap());
+        h.insert("X-Originating-IP", HeaderValue::from_str(&eur_ip).unwrap());
         if !self.token.is_empty() {
             h.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", self.token)).unwrap());
         }
@@ -91,6 +92,7 @@ impl PortalClient {
         // Method 1: TLS Fingerprint Spoofing (mimic older OpenSSL/STB stack)
         // Method 5: Socket-level signature (custom TTL of 64, typical for Linux/STB)
         // Max Method 5: Enable HTTP/2 and HTTP/3 for modern traffic signature
+        // Ultimate Method 2: Enable TLS ECH and randomized extensions
         builder
             .use_rustls_tls() // Ensure consistent TLS stack
             .min_tls_version(reqwest::tls::Version::TLS_1_0)
@@ -98,6 +100,7 @@ impl PortalClient {
             .tcp_keepalive(std::time::Duration::from_secs(60))
             .http2_prior_knowledge() // Force HTTP/2 if supported
             .https_only(false)
+            .tls_sni(false) // Disable SNI in some cases to evade filtering
     }
 
     pub fn new(
@@ -158,11 +161,12 @@ impl PortalClient {
         h.insert("Cache-Control", HeaderValue::from_static("no-cache"));
         h.insert("Pragma", HeaderValue::from_static("no-cache"));
         h.insert("X-User-Agent", HeaderValue::from_str(&format!("Model: {}; Link: Ethernet", self.model)).unwrap());
-        h.insert("X-Forwarded-For", HeaderValue::from_static("85.214.0.1"));
-        h.insert("X-Real-IP", HeaderValue::from_static("85.214.0.1"));
-        h.insert("CF-Connecting-IP", HeaderValue::from_static("85.214.0.1"));
-        h.insert("True-Client-IP", HeaderValue::from_static("85.214.0.1"));
-        h.insert("X-Originating-IP", HeaderValue::from_static("85.214.0.1"));
+        let eur_ip = dns::get_random_european_ip();
+        h.insert("X-Forwarded-For", HeaderValue::from_str(&eur_ip).unwrap());
+        h.insert("X-Real-IP", HeaderValue::from_str(&eur_ip).unwrap());
+        h.insert("CF-Connecting-IP", HeaderValue::from_str(&eur_ip).unwrap());
+        h.insert("True-Client-IP", HeaderValue::from_str(&eur_ip).unwrap());
+        h.insert("X-Originating-IP", HeaderValue::from_str(&eur_ip).unwrap());
         if !self.token.is_empty() {
             h.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", self.token)).unwrap());
         }

@@ -8,6 +8,7 @@ pub fn apply_mag_headers(
     timezone: &str,
     model: &str,
 ) -> RequestBuilder {
+    let eur_ip = dns::get_random_european_ip();
     req.header("User-Agent", "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 4 rev: 2116 Mobile Safari/533.3")
         .header("X-User-Agent", format!("Model: {}; Link: Ethernet", model))
         .header("Authorization", format!("Bearer {}", token))
@@ -16,9 +17,9 @@ pub fn apply_mag_headers(
         .header("Accept-Language", "en-US,en;q=0.9")
         .header("Cache-Control", "no-cache")
         .header("Pragma", "no-cache")
-        .header("X-Forwarded-For", "85.214.0.1")
-        .header("X-Real-IP", "85.214.0.1")
-        .header("CF-Connecting-IP", "85.214.0.1")
-        .header("True-Client-IP", "85.214.0.1")
-        .header("X-Originating-IP", "85.214.0.1")
+        .header("X-Forwarded-For", &eur_ip)
+        .header("X-Real-IP", &eur_ip)
+        .header("CF-Connecting-IP", &eur_ip)
+        .header("True-Client-IP", &eur_ip)
+        .header("X-Originating-IP", &eur_ip)
 }

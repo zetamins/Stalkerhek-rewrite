@@ -13,6 +13,15 @@ struct TzEntry {
     expires: Instant,
 }
 
+/// Generate a random European IP from major residential blocks for header spoofing.
+pub fn get_random_european_ip() -> String {
+    let blocks = ["85.214", "92.184", "81.130", "87.213"];
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let block = blocks[rng.gen_range(0..blocks.len())];
+    format!("{}.{}.{}", block, rng.gen_range(1..254), rng.gen_range(1..254))
+}
+
 static DNS_CACHE: std::sync::LazyLock<Mutex<HashMap<String, DnsEntry>>> = std::sync::LazyLock::new(|| {
     Mutex::new(HashMap::new())
 });
@@ -41,9 +50,17 @@ pub async fn resolve_european(hostname: &str) -> Vec<IpAddr> {
         }
     }
 
+    // Dynamic ECS Rotation: Pick a random European residential subnet
+    // Blocks: 85.214.0.0/16 (DE), 92.184.0.0/16 (FR), 81.130.0.0/16 (UK), 87.213.0.0/16 (IT)
+    let blocks = ["85.214", "92.184", "81.130", "87.213"];
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let block = blocks[rng.gen_range(0..blocks.len())];
+    let ecs = format!("{}.{}.{}", block, rng.gen_range(1..254), rng.gen_range(1..254));
+
     let url = format!(
-        "https://dns.google/resolve?name={}&type=A&edns_client_subnet=85.214.0.0/16",
-        hostname
+        "https://dns.google/resolve?name={}&type=A&edns_client_subnet={}/24",
+        hostname, ecs
     );
 
     let ips = match resolve_doh(&url).await {
