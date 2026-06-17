@@ -152,11 +152,25 @@ impl PortalClient {
 
     pub fn new(
         base_url: String, mut mac: String, username: String, password: String,
-        serial_number: String, device_id: String, device_id2: String,
+        mut serial_number: String, mut device_id: String, mut device_id2: String,
         signature: String, model: String, timezone: String,
         device_id_auth: bool,
     ) -> Self {
         mac = Self::repair_mac(&mac);
+
+        // Method 1: Identity Branching (The "Clone" Fix)
+        // Slightly mutate IDs to appear as a unique secondary device on the same subscription.
+        // This allows simultaneous streaming by avoiding session token conflicts.
+        if !serial_number.is_empty() {
+            serial_number = format!("{}B", serial_number);
+        }
+        if !device_id.is_empty() {
+            device_id = format!("{}B", device_id);
+        }
+        if !device_id2.is_empty() {
+            device_id2 = format!("{}B", device_id2);
+        }
+
         let ua = format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 2034 Mobile Safari/533.3", model);
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
