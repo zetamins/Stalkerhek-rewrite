@@ -38,10 +38,17 @@ pub fn apply_mag_headers(
     std::thread::sleep(std::time::Duration::from_millis(rng.gen_range(1..5)));
 
     // Method 2: Strict Header Sequencing (Physical MAG254 Order)
-    req.header("User-Agent", format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 2034 Mobile Safari/533.3", model))
+    // Absolute Method 1: Packet Length Obfuscation (DPI Death)
+    // Add randomized junk padding so every request has a different byte size.
+    let padding_len = rng.gen_range(32..128);
+    let padding: String = (0..padding_len).map(|_| (rng.gen_range(33..126) as u8) as char).collect();
+
+    req.header("User-Agent", format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: {} Mobile Safari/533.3", model, rev))
         .header("X-User-Agent", format!("Model: {}; Link: Ethernet", model))
         .header("Authorization", format!("Bearer {}", token))
+        .header("X-DPI-Padding", padding) // Randomized packet size
         // Transcendental Method 2: Stealth Cookie Jar (drop tracking cookies)
+
         .header("Cookie", format!("PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};", serial_number, mac, eur_tz))
         .header("Accept", "*/*")
         .header("Accept-Language", "en-US,en;q=0.9")

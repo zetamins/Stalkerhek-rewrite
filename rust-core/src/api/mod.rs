@@ -328,6 +328,22 @@ pub async fn start_profile_by_id(
     let watchdog_portal = portal_client.clone();
     let watchdog_interval = profile.watchdog_interval;
     let (watchdog_cancel_tx, watchdog_cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    
+    // Absolute Method 3: Standby/Heartbeat Emulation
+    // Runs every 30 minutes to maintain "Hardware Presence" on the portal.
+    let standby_portal = portal_client.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1800)).await; // 30 Minutes
+            let standby_client = standby_portal.read().await.clone_for_watchdog();
+            if let Err(e) = standby_client.watchdog_update().await {
+                tracing::warn!("Standby heartbeat failed for profile {profile_id}: {e}");
+            } else {
+                tracing::info!("Standby heartbeat sent for profile {profile_id}");
+            }
+        }
+    });
+
     if watchdog_interval > 0 {
         tokio::spawn(async move {
             let mut cancel = watchdog_cancel_rx;

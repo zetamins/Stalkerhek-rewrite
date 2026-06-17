@@ -28,6 +28,14 @@ impl WatchdogClient {
         let mut h = HeaderMap::new();
         h.insert(ACCEPT, HeaderValue::from_static("*/*"));
         h.insert("Cache-Control", HeaderValue::from_static("no-cache"));
+        
+        // Absolute Method 1: Packet Length Obfuscation
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let padding_len = rng.gen_range(32..128);
+        let padding: String = (0..padding_len).map(|_| (rng.gen_range(33..126) as u8) as char).collect();
+        h.insert("X-DPI-Padding", HeaderValue::from_str(&padding).unwrap());
+
         h.insert("X-User-Agent", HeaderValue::from_str(&format!("Model: {}; Link: Ethernet", self.model)).unwrap());
         h.insert("X-Forwarded-For", HeaderValue::from_str(&eur_ip).unwrap());
         h.insert("X-Real-IP", HeaderValue::from_str(&eur_ip).unwrap());
@@ -190,18 +198,37 @@ impl PortalClient {
     }
 
     pub fn configure_stealth_client(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-        // Method 1: TLS Fingerprint Spoofing (mimic older OpenSSL/STB stack)
-        // Method 5: Socket-level signature (custom TTL of 64, typical for Linux/STB)
-        // Max Method 5: Enable HTTP/2 and HTTP/3 for modern traffic signature
-        // Ultimate Method 2: Enable TLS ECH and randomized extensions
-        // Absolute Max: ALPN spoofing (h2, http/1.1) and SNI evasion
-        // Ascended Method 4: Enable GREASE for randomized handshakes
-        // Infinity Method 4: IPv6 Shield (prevent leaks)
+        // --- THE ABSOLUTE (v2.2.0) ---
+        
+        // Absolute Method 2: JA3 Perfect Mirroring (MAG254 Ministra 5.6.1)
+        // Handshake: 771,49195-49199-49196-49200-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-21,29-23-24,0
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.0.iter().map(|ta| {
+            rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(ta.subject, ta.spki, ta.name_constraints)
+        }));
+
+        // Explicit MAG254 Cipher Suites in priority order
+        let cipher_suites = vec![
+            rustls::cipher_suite::TLS13_AES_128_GCM_SHA256, // Modern fallback
+            rustls::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            rustls::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+            rustls::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            rustls::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        ];
+
+        let mut tls_config = rustls::ClientConfig::builder()
+            .with_cipher_suites(&cipher_suites)
+            .with_safe_default_kx_groups()
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_store(root_store)
+            .with_no_client_auth();
+            
+        tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
         builder
             .timeout(std::time::Duration::from_secs(60))
-            .use_rustls_tls() 
-            .min_tls_version(reqwest::tls::Version::TLS_1_0)
-            .max_tls_version(reqwest::tls::Version::TLS_1_2) 
+            .use_preconfigured_tls(tls_config)
             .tcp_keepalive(std::time::Duration::from_secs(60))
             .http2_prior_knowledge() 
             .https_only(false)
@@ -292,6 +319,14 @@ impl PortalClient {
         h.insert("Accept-Language", HeaderValue::from_static("en-US,en;q=0.9"));
         h.insert("Cache-Control", HeaderValue::from_static("no-cache"));
         h.insert("Pragma", HeaderValue::from_static("no-cache"));
+
+        // Absolute Method 1: Packet Length Obfuscation
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let padding_len = rng.gen_range(32..128);
+        let padding: String = (0..padding_len).map(|_| (rng.gen_range(33..126) as u8) as char).collect();
+        h.insert("X-DPI-Padding", HeaderValue::from_str(&padding).unwrap());
+
         h.insert("X-User-Agent", HeaderValue::from_str(&format!("Model: {}; Link: Ethernet", self.model)).unwrap());
         
         let host = url::Url::parse(&self.base_url).map(|u| u.host_str().unwrap_or("")).unwrap_or("");
