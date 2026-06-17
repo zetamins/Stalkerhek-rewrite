@@ -88,6 +88,19 @@ pub struct PortalClient {
 }
 
 impl PortalClient {
+    /// Calculate the hardware version hash (SHA1 of MAC).
+    fn calculate_hw_version(mac: &str) -> String {
+        use sha1::{Sha1, Digest};
+        let mut hasher = Sha1::new();
+        hasher.update(mac.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    /// Calculate the API signature. In most modern portals, 262 is the magic level.
+    fn api_signature() -> &'static str {
+        "262"
+    }
+
     /// Ensure the MAC address is a valid 12-digit hex string with colons.
     /// If the input is a valid 12-digit hex string, we preserve it.
     /// If it is shorter, we pad it with the Infomir OUI (00:1A:79).
@@ -245,6 +258,7 @@ impl PortalClient {
         if self.handshake().await.is_err() {
             tracing::warn!("Handshake failed, continuing anyway");
         }
+        let hw_version = Self::calculate_hw_version(&self.mac);
         let params = [
             ("type", "stb"),
             ("action", "do_auth"),
@@ -252,6 +266,8 @@ impl PortalClient {
             ("password", &self.password),
             ("device_id", &self.device_id),
             ("device_id2", &self.device_id2),
+            ("hw_version_2", &hw_version),
+            ("api_signature", Self::api_signature()),
             ("JsHttpRequest", "1-xml"),
         ];
         let resp = self.client.post(&self.base_url)
@@ -281,10 +297,12 @@ impl PortalClient {
 
     async fn authenticate_device_id(&mut self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         self.handshake().await?;
+        let hw_version = Self::calculate_hw_version(&self.mac);
         let url = format!(
-            "{}?type=stb&action=get_profile&JsHttpRequest=1-xml&hd=1&sn={}&stb_type={}&device_id={}&device_id2={}&auth_second_step=1",
+            "{}?type=stb&action=get_profile&JsHttpRequest=1-xml&hd=1&sn={}&stb_type={}&device_id={}&device_id2={}&hw_version_2={}&api_signature={}&auth_second_step=1",
             self.base_url, urlencoding(&self.serial_number), urlencoding(&self.model),
-            urlencoding(&self.device_id), urlencoding(&self.device_id2)
+            urlencoding(&self.device_id), urlencoding(&self.device_id2),
+            urlencoding(&hw_version), urlencoding(Self::api_signature())
         );
         let resp = self.client.get(&url)
             .headers(self.headers())
