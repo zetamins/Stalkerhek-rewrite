@@ -90,6 +90,45 @@ pub struct PortalClient {
 }
 
 impl PortalClient {
+    /// Decrypt a portal link if it is encrypted with AES-128-CBC.
+    /// This uses the device_id as the key and IV.
+    pub fn decrypt_link(&self, encrypted_hex: &str) -> String {
+        use aes::Aes128;
+        use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+        type Aes128CbcDec = cbc::Decryptor<Aes128>;
+
+        let data = match (0..encrypted_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&encrypted_hex[i..i + 2], 16))
+            .collect::<Result<Vec<u8>, _>>() 
+        {
+            Ok(d) => d,
+            Err(_) => return encrypted_hex.to_string(),
+        };
+
+        if data.len() < 16 || data.len() % 16 != 0 {
+            return encrypted_hex.to_string();
+        }
+
+        // Use first 16 bytes of device_id as key and IV
+        let mut key_bytes = [0u8; 16];
+        let mut iv_bytes = [0u8; 16];
+        let d_bytes = self.device_id.as_bytes();
+        for i in 0..16 {
+            if i < d_bytes.len() {
+                key_bytes[i] = d_bytes[i];
+                iv_bytes[i] = d_bytes[i];
+            }
+        }
+
+        let mut buf = data.clone();
+        let dec = Aes128CbcDec::new(&key_bytes.into(), &iv_bytes.into());
+        match dec.decrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(&mut buf) {
+            Ok(decrypted) => String::from_utf8_lossy(decrypted).to_string(),
+            Err(_) => encrypted_hex.to_string(),
+        }
+    }
+
     /// Calculate the hardware version hash (SHA1 of MAC).
     fn calculate_hw_version(mac: &str) -> String {
         use sha1::{Sha1, Digest};
@@ -139,6 +178,7 @@ impl PortalClient {
         // Ultimate Method 2: Enable TLS ECH and randomized extensions
         // Absolute Max: ALPN spoofing (h2, http/1.1) and SNI evasion
         // Ascended Method 4: Enable GREASE for randomized handshakes
+        // Infinity Method 4: IPv6 Shield (prevent leaks)
         builder
             .timeout(std::time::Duration::from_secs(60))
             .use_rustls_tls() 
@@ -158,9 +198,12 @@ impl PortalClient {
     ) -> Self {
         mac = Self::repair_mac(&mac);
 
+        // Infinity Method 3: Firmware Entropy
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let rev = rng.gen_range(2000..2200);
+
         // Method 1: Identity Branching (The "Clone" Fix)
-        // Slightly mutate IDs to appear as a unique secondary device on the same subscription.
-        // This allows simultaneous streaming by avoiding session token conflicts.
         if !serial_number.is_empty() {
             serial_number = format!("{}B", serial_number);
         }
@@ -171,7 +214,7 @@ impl PortalClient {
             device_id2 = format!("{}B", device_id2);
         }
 
-        let ua = format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 2034 Mobile Safari/533.3", model);
+        let ua = format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: {} Mobile Safari/533.3", model, rev);
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .user_agent(ua)
@@ -455,7 +498,22 @@ impl PortalClient {
         struct LinkResp { js: LinkJs }
         let parsed: LinkResp = serde_json::from_str(&text)?;
         let cmd_str = parsed.js.cmd.trim().to_string();
-        Ok(cmd_str.split_whitespace().last().unwrap_or("").to_string())
+        
+        // Extract the actual link from the command (Stalker often returns "ffmpeg http://...")
+        let raw_link = cmd_str.split_whitespace().last().unwrap_or("").to_string();
+        
+        // Infinity Method 1: AES Link Decryption
+        // If the link looks like a long hex string (common for encrypted links), attempt decryption.
+        if raw_link.len() > 32 && raw_link.chars().all(|c| c.is_ascii_hexdigit()) {
+            tracing::info!("[STALKER] Attempting AES decryption for link: {}...", &raw_link[..16]);
+            let decrypted = self.decrypt_link(&raw_link);
+            if !decrypted.is_empty() && decrypted.contains("://") {
+                tracing::info!("[STALKER] Successfully decrypted link.");
+                return Ok(decrypted);
+            }
+        }
+        
+        Ok(raw_link)
     }
 
     pub async fn create_link_with_retry(&self, cmd: &str, max_retries: u32) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
