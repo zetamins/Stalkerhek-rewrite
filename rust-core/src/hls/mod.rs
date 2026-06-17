@@ -356,36 +356,31 @@ async fn proxy_request(
     token: &str, serial_number: &str, mac: &str, timezone: &str, model: &str,
     shared_client: &reqwest::Client,
 ) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
-    // Resolve stream hostname via European DNS to bypass geo-blocking
-    let parsed_url = url::Url::parse(url)?;
-    let stream_host = parsed_url.host_str().unwrap_or("").to_string();
-    let stream_port = parsed_url.port_or_known_default().unwrap_or(443);
-    let eur_ips = dns::resolve_european(&stream_host).await;
-
-    // If DNS resolved a specific IP, build a pinned client; otherwise use the shared one.
-    // This avoids creating a new client (with its connection pool) on every request.
-    let client;
-    let client_ref: &reqwest::Client;
-    if !eur_ips.is_empty() {
-        tracing::info!("[HLS] European DNS for {}: {:?}", stream_host, eur_ips);
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .redirect(reqwest::redirect::Policy::none())
-            .resolve(&stream_host, SocketAddr::new(eur_ips[0], stream_port));
-        
-        builder = stalker::PortalClient::configure_stealth_client(builder);
-        client = builder.build()?;
-        client_ref = &client;
-    } else {
-        client_ref = shared_client;
-    }
-
-    // Follow redirect chain manually, preserving all headers on every hop.
-    // Stream URLs often redirect through CDN/storage server chains and
-    // dropping Authorization or Cookie on any hop causes a 444/458 block.
+    // Follow redirect chain manually, preserving all headers and DNS pinning on every hop.
+    // DNS is re-resolved on every hop to ensure pinning persists across cross-domain redirects.
     let mut current_url = url.to_string();
     let max_redirects = 200;
     for hop in 0..=max_redirects {
+        let parsed_url = url::Url::parse(&current_url)?;
+        let current_host = parsed_url.host_str().unwrap_or("").to_string();
+        let current_port = parsed_url.port_or_known_default().unwrap_or(443);
+        let eur_ips = dns::resolve_european(&current_host).await;
+
+        let client;
+        let client_ref: &reqwest::Client;
+        if !eur_ips.is_empty() {
+            let mut builder = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(300))
+                .redirect(reqwest::redirect::Policy::none())
+                .resolve(&current_host, SocketAddr::new(eur_ips[0], current_port));
+            
+            builder = stalker::PortalClient::configure_stealth_client(builder);
+            client = builder.build()?;
+            client_ref = &client;
+        } else {
+            client_ref = shared_client;
+        }
+
         let req = client_ref.get(&current_url);
         let req = crate::mag::apply_mag_headers(req, token, serial_number, mac, timezone, model);
         tracing::info!("[HLS] fetch (hop {}/{}): {}", hop, max_redirects, current_url);

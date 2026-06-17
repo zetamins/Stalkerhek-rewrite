@@ -13,13 +13,25 @@ struct TzEntry {
     expires: Instant,
 }
 
-/// Generate a random European IP from major residential blocks for header spoofing.
-pub fn get_random_european_ip() -> String {
-    let blocks = ["85.214", "92.184", "81.130", "87.213"];
+/// Generate a random European IP and its matching timezone from major residential blocks.
+pub fn get_random_european_identity() -> (String, String) {
+    let data = [
+        ("85.214", "Europe/Berlin"),   // Germany
+        ("92.184", "Europe/Paris"),    // France
+        ("81.130", "Europe/London"),   // UK
+        ("87.213", "Europe/Rome"),     // Italy
+        ("213.205", "Europe/London"),  // O2 UK
+    ];
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    let block = blocks[rng.gen_range(0..blocks.len())];
-    format!("{}.{}.{}", block, rng.gen_range(1..254), rng.gen_range(1..254))
+    let (block, tz) = data[rng.gen_range(0..data.len())];
+    let ip = format!("{}.{}.{}", block, rng.gen_range(1..254), rng.gen_range(1..254));
+    (ip, tz.to_string())
+}
+
+/// Generate a random European IP for header spoofing.
+pub fn get_random_european_ip() -> String {
+    get_random_european_identity().0
 }
 
 static DNS_CACHE: std::sync::LazyLock<Mutex<HashMap<String, DnsEntry>>> = std::sync::LazyLock::new(|| {

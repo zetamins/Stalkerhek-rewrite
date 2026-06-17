@@ -394,46 +394,41 @@ async fn proxy_handler(
         format!("{}?{}", st.portal_base, qs.join("&"))
     };
 
-    // Use European DNS resolution and manual redirect following to bypass
-    // geo-blocks and preserve all headers across cross-origin redirect hops.
-    let parsed_url = match Url::parse(&final_url) {
-        Ok(u) => u,
-        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
-    };
-    let stream_host = parsed_url.host_str().unwrap_or("").to_string();
-    let stream_port = parsed_url.port_or_known_default().unwrap_or(443);
-    let eur_ips = dns::resolve_european(&stream_host).await;
-
-    let pinned_client;
-    let client: &reqwest::Client;
-    if !eur_ips.is_empty() {
-        tracing::info!("[PROXY] European DNS for {}: {:?}", stream_host, eur_ips);
-        let mut builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(300))
-            .redirect(reqwest::redirect::Policy::none())
-            .resolve(&stream_host, SocketAddr::new(eur_ips[0], stream_port));
-            
-        builder = stalker::PortalClient::configure_stealth_client(builder);
-        
-        match builder.build() {
-            Ok(c) => { pinned_client = Some(c); client = pinned_client.as_ref().unwrap(); }
-            Err(_) => { pinned_client = None; client = &st.portal_http_client; }
-        }
-    } else {
-        pinned_client = None;
-        client = &st.portal_http_client;
-    }
-
-    // Read token once for this request
-    let current_token = st.token.read().await.clone();
-
-    // Manual redirect loop — preserve all headers (Authorization, Cookie) on every hop
+    // Manual redirect loop — preserve all headers (Authorization, Cookie) on every hop.
+    // DNS is re-resolved on every hop to ensure pinning persists across cross-domain redirects.
     let mut current_url = final_url;
     let max_redirects = 200;
     let mut response = None;
     let mut is_458 = false;
 
     for hop in 0..=max_redirects {
+        let parsed_url = match Url::parse(&current_url) {
+            Ok(u) => u,
+            Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+        };
+        let current_host = parsed_url.host_str().unwrap_or("").to_string();
+        let current_port = parsed_url.port_or_known_default().unwrap_or(443);
+        let eur_ips = dns::resolve_european(&current_host).await;
+
+        let pinned_client;
+        let client: &reqwest::Client;
+        if !eur_ips.is_empty() {
+            let mut builder = reqwest::Client::builder()
+                .timeout(Duration::from_secs(300))
+                .redirect(reqwest::redirect::Policy::none())
+                .resolve(&current_host, SocketAddr::new(eur_ips[0], current_port));
+            
+            builder = stalker::PortalClient::configure_stealth_client(builder);
+            
+            match builder.build() {
+                Ok(c) => { pinned_client = Some(c); client = pinned_client.as_ref().unwrap(); }
+                Err(_) => { pinned_client = None; client = &st.portal_http_client; }
+            }
+        } else {
+            pinned_client = None;
+            client = &st.portal_http_client;
+        }
+
         let proxy_req = if is_post && hop == 0 {
             client.post(&current_url).body(body.clone())
         } else {
