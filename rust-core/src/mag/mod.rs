@@ -31,10 +31,10 @@ pub fn apply_mag_headers(
     mac: &str,
     _timezone: &str,
     model: &str,
-    host: &str, // Pass host for sticky identity
+    host: &str,
 ) -> RequestBuilder {
     // Transcendental Method 1: Sticky identity per host (4 hours)
-    let (eur_ip, eur_tz) = crate::dns::get_sticky_european_identity(host);
+    let (_eur_ip, eur_tz) = crate::dns::get_sticky_european_identity(host);
 
     // Transcendental Method 5: Micro-Jitter (1-5ms) to mimic human timing
     use rand::Rng;
@@ -51,19 +51,13 @@ pub fn apply_mag_headers(
     req.header("User-Agent", format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/{} (KHTML, like Gecko) {} stbapp ver: {} rev: {} Mobile Safari/{}", fp.webkit_ver, model, fp.stbapp_major, rev, fp.safari_ver))
         .header("X-User-Agent", format!("Model: {}; Link: Ethernet", model))
         .header("Authorization", format!("Bearer {}", token))
-        .header("X-DPI-Padding", padding) // Randomized packet size
+        .header("X-DPI-Padding", padding)
         // Transcendental Method 2: Stealth Cookie Jar (drop tracking cookies)
-
         .header("Cookie", format!("PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};", serial_number, mac, eur_tz))
         .header("Accept", "*/*")
         .header("Accept-Encoding", "gzip, deflate, br")
         .header("Accept-Language", &crate::dns::get_sticky_accept_language(host))
         .header("Cache-Control", "no-cache")
         .header("Pragma", "no-cache")
-        .header("X-Forwarded-For", &eur_ip)
-        .header("X-Real-IP", &eur_ip)
-        .header("CF-Connecting-IP", &eur_ip)
-        .header("True-Client-IP", &eur_ip)
-        .header("X-Originating-IP", &eur_ip)
         .header("Connection", "keep-alive")
 }

@@ -28,9 +28,6 @@ pub struct HlsState {
     pub mac: String,
     pub timezone: String,
     pub model: String,
-    /// Shared HTTP client for stream proxying (no auto-redirect, 300s timeout).
-    /// reqwest::Client is cheap to clone (Arc internally) so all handlers share one pool.
-    pub stream_client: reqwest::Client,
 }
 
 #[derive(Clone)]
@@ -55,15 +52,6 @@ pub fn build_router(
         ChannelState { info: ch }
     }).collect();
 
-    let stream_client = {
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .redirect(reqwest::redirect::Policy::none());
-        
-        builder = stalker::PortalClient::configure_stealth_client(builder);
-        builder.build().unwrap_or_default()
-    };
-
     let state = HlsState {
         channels: Arc::new(RwLock::new(channel_states)),
         channel_map: Arc::new(RwLock::new(channel_map)),
@@ -75,7 +63,6 @@ pub fn build_router(
         mac,
         timezone,
         model,
-        stream_client,
     };
 
     Router::new()
@@ -234,45 +221,93 @@ async fn channel_handler(
     let scheme = scheme_from_request(&req);
     let host = host_from_request(&req);
 
-    // Build target URL
-    let target_url = if suffix.is_empty() {
-        stream_url
-    } else {
-        format!("{}{}", get_hls_root_for_url(&stream_url), suffix)
-    };
-
-    // Try the request
-    let current_token = st.token.read().await.clone();
-    let result = proxy_request(
-        &target_url, &scheme, &host, &title, &cmd, !suffix.is_empty(),
-        &current_token, &st.serial_number, &st.mac, &st.timezone, &st.model,
-        &st.stream_client,
-    ).await;
-
-    // On 458 (Cloudflare ban) for initial playlist, retry with fresh channel data
+    // Direct CDN URLs (not through portal's /play/live.php) — proxy directly.
+    // Portal stream URLs (tres.4vps.info/play/live.php) — use fetch_stream
+    // which does create_link + get on same connection.
     if suffix.is_empty() {
-        if let Ok(ref r) = result {
-            if r.status().as_u16() == 458 {
-                tracing::warn!("[HLS] got 458 for {}, refreshing channels...", &title);
-                return refresh_and_retry(&st, &title, &suffix, &scheme, &host).await
-                    .unwrap_or_else(|e| {
-                        tracing::error!("Retry failed for {}: {}", title, e);
-                        StatusCode::SERVICE_UNAVAILABLE.into_response()
-                    });
-            }
-            // 401: re-authenticate and retry once
-            if r.status().as_u16() == 401 {
-                if let Some(resp) = handle_401_and_retry(&st, &target_url, &scheme, &host, &title, &cmd, false).await {
-                    return resp;
+        let is_direct_cdn = !stream_url.contains("/play/live.php");
+        if is_direct_cdn {
+            // Direct CDN: proxy the URL directly (not behind Cloudflare geo-block)
+            let stream_client = { st.portal_client.read().await.http_client().clone() };
+            let (_ip, tz) = crate::dns::get_sticky_european_identity(&host);
+            let target_url = stream_url.replacen("http://", "https://", 1);
+            match stream_client.get(&target_url)
+                .header("User-Agent", format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 250 Mobile Safari/533.3", st.model))
+                .header("Cookie", format!("PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};", st.serial_number, st.mac, tz))
+                .header("Accept", "*/*")
+                .send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let headers = resp.headers().clone();
+                    let body = resp.bytes().await.unwrap_or_default();
+                    let body_str = String::from_utf8_lossy(&body);
+                    let rewritten = if body_str.starts_with("#EXTM3U") { rewrite_m3u8(&body_str, &scheme, &host, &title) } else { body_str.into_owned() };
+                    let mut response = Response::builder().status(status);
+                    for (k, v) in headers.iter() {
+                        let ks = k.as_str().to_lowercase();
+                        if !["host","connection","transfer-encoding","keep-alive","te","trailer","upgrade","content-encoding","content-length"].contains(&ks.as_str()) {
+                            response = response.header(k, v);
+                        }
+                    }
+                    return response.header("Access-Control-Allow-Origin", "*")
+                        .body(Body::from(rewritten)).unwrap();
+                }
+                Err(e) => {
+                    tracing::warn!("[HLS] direct CDN fetch failed for {title}: {e}");
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
                 }
             }
         }
+        // Portal stream: use fetch_stream (create_link + GET on same client)
+        let pc = st.portal_client.read().await;
+        match pc.fetch_stream(&cmd).await {
+            Ok((body_bytes, upstream_headers)) => {
+                let body_str = String::from_utf8_lossy(&body_bytes);
+                let rewritten = rewrite_m3u8(&body_str, &scheme, &host, &title);
+                let mut response = Response::builder().status(200);
+                for (k, v) in upstream_headers.iter() {
+                    let ks = k.as_str().to_lowercase();
+                    if !["host","connection","transfer-encoding","keep-alive","te","trailer","upgrade","content-encoding","content-type"].contains(&ks.as_str()) {
+                        response = response.header(k, v);
+                    }
+                }
+                return response
+                    .header("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8")
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(Body::from(rewritten)).unwrap();
+            }
+            Err(e) => {
+                tracing::error!("[HLS] fetch_stream failed for {title}: {e}");
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+        }
     }
-
-    match result {
-        Ok(r) => r,
+    // TS segments: use cached stream_url with upgraded protocol
+    let ts_url = upgrade_to_https(&if suffix.is_empty() { stream_url } else { format!("{}{}", get_hls_root_for_url(&stream_url), suffix) });
+    let stream_client = { st.portal_client.read().await.http_client().clone() };
+    let (_ip, tz) = crate::dns::get_sticky_european_identity(&host);
+    match stream_client.get(&ts_url)
+        .header("User-Agent", format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 250 Mobile Safari/533.3", st.model))
+        .header("Cookie", format!("PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};", st.serial_number, st.mac, tz))
+        .header("Accept", "*/*")
+        .send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let body = resp.bytes().await.unwrap_or_default();
+            let mut response = Response::builder().status(status);
+            for (k, v) in headers.iter() {
+                let ks = k.as_str().to_lowercase();
+                if !["host","connection","transfer-encoding","keep-alive","te","trailer","upgrade","content-encoding"].contains(&ks.as_str()) {
+                    response = response.header(k, v);
+                }
+            }
+            response.header("Access-Control-Allow-Origin", "*")
+                .header("Content-Length", body.len())
+                .body(Body::from(body.to_vec())).unwrap()
+        }
         Err(e) => {
-            tracing::error!("Proxy failed for {title}: {e}");
+            tracing::error!("TS segment failed for {title}: {e}");
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         }
     }
@@ -361,6 +396,15 @@ async fn epg_handler(
     }
 }
 
+/// Get a fresh stream URL for a single channel via create_link.
+/// This is much faster than re-fetching all channels when a play_token expires.
+async fn fresh_stream_url(
+    st: &HlsState, cmd: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let client = st.portal_client.read().await;
+    client.create_link(cmd).await
+}
+
 /// Re-fetch channels from portal to get fresh play_tokens, update cache, and retry.
 async fn refresh_and_retry(
     st: &HlsState, title: &str, suffix: &str, scheme: &str, host: &str,
@@ -407,12 +451,22 @@ async fn refresh_and_retry(
         format!("{}{}", get_hls_root_for_url(&new_url), suffix)
     };
 
+    let stream_client = { let pc = st.portal_client.read().await; pc.http_client().clone() };
+    let mut new_target = new_target;
+    new_target = upgrade_to_https(&new_target);
     tracing::info!("[HLS] retrying {} with fresh token", title);
     proxy_request(
         &new_target, scheme, host, title, &new_cmd, !suffix.is_empty(),
         &fresh_token, &st.serial_number, &st.mac, &st.timezone, &st.model,
-        &st.stream_client,
+        &stream_client,
     ).await
+}
+
+/// Upgrade an HTTP URL to HTTPS and strip port 80, so the request reuses
+/// the PortalClient's authenticated HTTP/2 connection to Cloudflare.
+fn upgrade_to_https(url: &str) -> String {
+    let s = url.replacen("http://", "https://", 1);
+    s.replace(":80/", "/").replacen(":80?", "?", 1)
 }
 
 fn get_hls_root_for_url(url: &str) -> String {
@@ -439,25 +493,31 @@ async fn proxy_request(
         let parsed_url = url::Url::parse(&current_url)?;
         let current_host = parsed_url.host_str().unwrap_or("").to_string();
         let current_port = parsed_url.port_or_known_default().unwrap_or(443);
-        let eur_ips = dns::resolve_european(&current_host).await;
 
-        let client;
-        let client_ref: &reqwest::Client;
-        if !eur_ips.is_empty() {
-            let mut builder = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(60))
-                .redirect(reqwest::redirect::Policy::none())
-                .resolve(&current_host, SocketAddr::new(eur_ips[0], current_port));
-            
-            builder = stalker::PortalClient::configure_stealth_client(builder);
-            client = builder.build()?;
-            client_ref = &client;
-        } else {
-            client_ref = shared_client;
+        // Always use the shared client (PortalClient's HTTP/2 connection) —
+        // Cloudflare binds stream play_tokens to the authenticated API session connection.
+        // Creating a new client with DNS pinning breaks this binding and causes 458/444.
+        let client_ref: &reqwest::Client = shared_client;
+
+        // Warm up the HTTP/2 connection: make a quick API call to portal.php first.
+        // Cloudflare binds stream play_tokens to the authenticated HTTP/2 session.
+        // Without a recent API call on the same connection, the stream gets 458.
+        if hop == 0 {
+            let warmup_url = format!("https://{}/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml", current_host);
+            let mac_s = mac.to_string();
+            let sn_s = serial_number.to_string();
+            let model_s = model.to_string();
+            let _ = client_ref.post(&warmup_url)
+                .form(&[("mac", &mac_s), ("sn", &sn_s), ("stb_type", &model_s)])
+                .send().await;
         }
 
+        let (_eur_ip, eur_tz) = crate::dns::get_sticky_european_identity(&current_host);
         let mut req = client_ref.get(&current_url);
-        req = crate::mag::apply_mag_headers(req, token, serial_number, mac, timezone, model, &current_host);
+        req = req
+            .header("User-Agent", format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 250 Mobile Safari/533.3", model))
+            .header("Cookie", format!("PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};", serial_number, mac, eur_tz))
+            .header("Accept", "*/*");
         tracing::info!("[HLS] fetch (hop {}/{}): {}", hop, max_redirects, current_url);
         let resp = req.send().await?;
         let status = resp.status();
@@ -630,8 +690,11 @@ pub async fn handle_401_and_retry(
         client.token.clone()
     };
     *st.token.write().await = new_token.clone();
+    let stream_client = { let pc = st.portal_client.read().await; pc.http_client().clone() };
+    let mut url = url.to_string();
+    url = upgrade_to_https(&url);
     tracing::info!("[HLS] re-auth succeeded, retrying {}", title);
-    proxy_request(url, scheme, host, title, cmd, is_suffix, &new_token,
-        &st.serial_number, &st.mac, &st.timezone, &st.model, &st.stream_client)
+    proxy_request(&url, scheme, host, title, cmd, is_suffix, &new_token,
+        &st.serial_number, &st.mac, &st.timezone, &st.model, &stream_client)
         .await.ok()
 }

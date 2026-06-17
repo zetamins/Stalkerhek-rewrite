@@ -146,6 +146,10 @@ async fn proxy_handler(
     query: Query<ProxyQuery>,
     body: axum::body::Bytes,
 ) -> Response {
+    // Skip favicon — not needed by STB
+    if uri.path().contains("favicon") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     tracing::info!("[PROXY] {} — action={:?} type={:?} cmd={:?}", uri, query.action, query.r#type, query.cmd);
     if let Some(action) = &query.action {
         match action.as_str() {
@@ -187,20 +191,6 @@ async fn proxy_handler(
                     .body(Body::from(
                         r#"{"js":true,"text":"Authenticated"}"#,
                     ))
-                    .unwrap();
-            }
-            "get_profile" => {
-                // Return a minimal valid profile so the STB proceeds to channel loading.
-                // Without this the STB stalls waiting for profile fields it never gets.
-                let tok = st.token.read().await.clone();
-                return Response::builder()
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(format!(
-                        r#"{{"js":{{"id":"1","name":"IPTV","status":"1","msg":"","token":"{}","logo":"","fname":"User","set_diff_url":0,"stb_type":"{}","provider_id":"1","tariff_expired_date":"","created":"2020-01-01 00:00:00","blocked":"0","block_msg":null,"updated":"2020-01-01 00:00:00","now":"{}","timeslot":1,"timeslot_tv":0,"video_out":"HDMI","en_additional_services_on":"1","hdmi_event_enabled":"0"}},"text":"loaded profile in: 0.01s"}}"#,
-                        tok,
-                        st.model,
-                        chrono_now_str(),
-                    )))
                     .unwrap();
             }
             "logout" => {
@@ -307,7 +297,18 @@ async fn proxy_handler(
                 if let Some(cmd) = &query.cmd {
                     let channel_data = {
                         let ch_guard = st.channels.read().await;
-                        ch_guard.get(cmd.as_str()).cloned()
+                        // Try exact match first
+                        if let Some(ch) = ch_guard.get(cmd.as_str()) {
+                            Some(ch.clone())
+                        } else {
+                            // Fallback: match by stream ID extracted from cmd URL (e.g., "stream=691402")
+                            let stream_id = extract_stream_id(cmd);
+                            ch_guard.values().find(|ch| {
+                                if cmd == &ch.cmd { return true; }
+                                if !stream_id.is_empty() && ch.cmd.contains(&format!("stream={}", stream_id)) { return true; }
+                                false
+                            }).cloned()
+                        }
                     };
                     if let Some(channel) = channel_data {
                         let allowed = {
@@ -367,11 +368,23 @@ async fn proxy_handler(
         }
     }
 
+    let request_path = uri.path();
+    // API requests go to /portal.php, not the portal base path (/c/)
+    let api_base = if request_path.starts_with("/portal.php") {
+        // Extract scheme+host from portal_base to build https://host/portal.php
+        match url::Url::parse(&st.portal_base) {
+            Ok(u) => {
+                let scheme = if u.scheme() == "http" { "https" } else { u.scheme() };
+                format!("{}://{}/portal.php", scheme, u.host_str().unwrap_or(""))
+            }
+            Err(_) => st.portal_base.clone()
+        }
+    } else {
+        st.portal_base.clone()
+    };
+
     let final_url = if query_params.is_empty() {
         // Static asset or root request — proxy to portal_root with the request path
-        // Strip any portal root path prefix (e.g., "/c/") so requests to
-        // "/c/version.js" map to "portal_root/version.js"
-        let request_path = uri.path();
         let stripped = if request_path.starts_with(&st.portal_root_path) {
             &request_path[st.portal_root_path.len()..]
         } else {
@@ -387,7 +400,7 @@ async fn proxy_handler(
         let qs: Vec<String> = query_params.iter()
             .map(|(k, v)| format!("{}={}", k, url_encode(v)))
             .collect();
-        format!("{}?{}", st.portal_base, qs.join("&"))
+        format!("{}?{}", api_base, qs.join("&"))
     };
 
     // Manual redirect loop — preserve all headers (Authorization, Cookie) on every hop.
@@ -562,6 +575,17 @@ async fn proxy_handler(
         }
     }
     response.body(Body::from(final_body.to_vec())).unwrap()
+}
+
+/// Extract the stream ID from a cmd/URL like "ffmpeg http://.../live.php?...&stream=691402&..."
+pub(crate) fn extract_stream_id(cmd: &str) -> String {
+    // Try to find "stream=XXXXX" pattern in the URL
+    if let Some(pos) = cmd.find("stream=") {
+        let rest = &cmd[pos + 7..];
+        rest.chars().take_while(|c| c.is_ascii_digit()).collect()
+    } else {
+        String::new()
+    }
 }
 
 fn generate_create_link_response(stream_url: &str, id: &str, ch_id: &str) -> String {

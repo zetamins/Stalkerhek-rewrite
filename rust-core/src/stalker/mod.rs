@@ -16,43 +16,39 @@ pub struct WatchdogClient {
 }
 
 impl WatchdogClient {
+    fn api_url(&self) -> String {
+        let parsed = url::Url::parse(&self.base_url).ok();
+        let scheme = parsed.as_ref().and_then(|u| {
+            if u.scheme() == "http" { Some("https") } else { Some(u.scheme()) }
+        }).unwrap_or("https");
+        let host = parsed.as_ref().and_then(|u| u.host_str()).unwrap_or("");
+        format!("{}://{}/portal.php", scheme, host)
+    }
+
     pub async fn watchdog_update(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}?action=get_events&event_active_id=0&init=0&type=watchdog&cur_play_type=1&JsHttpRequest=1-xml",
-            self.base_url
+            self.api_url()
         );
-        let host_str = url::Url::parse(&self.base_url).ok().and_then(|u| u.host_str().map(|s| s.to_string())).unwrap_or_default();
-        let (eur_ip, eur_tz) = dns::get_sticky_european_identity(&host_str);
-        
+        let params = [
+            ("mac", self.mac.as_str()),
+            ("sn", self.serial_number.as_str()),
+        ];
+
         use reqwest::header::*;
         let mut h = HeaderMap::new();
         h.insert(ACCEPT, HeaderValue::from_static("*/*"));
         h.insert("Cache-Control", HeaderValue::from_static("no-cache"));
-
-        // Absolute Method 1: Packet Length Obfuscation
-        {
-            use rand::Rng;
-            let mut rng = rand::thread_rng();
-            let padding_len = rng.gen_range(32..128);
-            let padding: String = (0..padding_len).map(|_| (rng.gen_range(33..126) as u8) as char).collect();
-            h.insert("X-DPI-Padding", HeaderValue::from_str(&padding).unwrap());
-        }
-
         h.insert("X-User-Agent", HeaderValue::from_str(&format!("Model: {}; Link: Ethernet", self.model)).unwrap());
-        h.insert("X-Forwarded-For", HeaderValue::from_str(&eur_ip).unwrap());
-        h.insert("X-Real-IP", HeaderValue::from_str(&eur_ip).unwrap());
-        h.insert("CF-Connecting-IP", HeaderValue::from_str(&eur_ip).unwrap());
-        h.insert("True-Client-IP", HeaderValue::from_str(&eur_ip).unwrap());
-        h.insert("X-Originating-IP", HeaderValue::from_str(&eur_ip).unwrap());
         if !self.token.is_empty() {
             h.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", self.token)).unwrap());
         }
         let cookie = format!(
             "PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};",
-            urlencoding(&self.serial_number), urlencoding(&self.mac), urlencoding(&eur_tz),
+            urlencoding(&self.serial_number), urlencoding(&self.mac), urlencoding(&self.timezone),
         );
         h.insert(COOKIE, HeaderValue::from_str(&cookie).unwrap());
-        let resp = self.client.get(&url).headers(h).send().await?;
+        let resp = self.client.post(&url).headers(h).form(&params).send().await?;
         let _ = resp.text().await?;
         Ok(())
     }
@@ -124,6 +120,13 @@ pub struct PortalClient {
 }
 
 impl PortalClient {
+    /// Get a reference to the internal HTTP client for connection reuse.
+    /// Stream access must use the same client as API calls — Cloudflare binds
+    /// play_tokens to the authenticated HTTP/2 connection.
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
     /// Omnipotent Method 2: Identity Multiversing
     /// Instantly "kills" the current session and regenerates a fresh identity.
     pub fn reborn(&mut self) {
@@ -246,8 +249,7 @@ impl PortalClient {
         builder
             .timeout(std::time::Duration::from_secs(60))
             .use_rustls_tls()
-            .min_tls_version(reqwest::tls::Version::TLS_1_0)
-            .max_tls_version(reqwest::tls::Version::TLS_1_2)
+            .min_tls_version(reqwest::tls::Version::TLS_1_2)
             .tcp_keepalive(std::time::Duration::from_secs(60))
             // HTTP/2 SETTINGS fingerprint matching (MAG254 WebKit defaults)
             .http2_initial_stream_window_size(65535)
@@ -257,8 +259,10 @@ impl PortalClient {
             .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
             // TCP stack fingerprinting
             .tcp_nodelay(true)           // MAG254 disables Nagle's algorithm
-            .https_only(false)           // allow HTTP connections
-            .tls_sni(false)
+            .pool_max_idle_per_host(1)   // force single-connection: create_link +
+                                         // stream must share same TCP/TLS session
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .https_only(false)
             .local_address(Some(std::net::Ipv4Addr::UNSPECIFIED.into()))
     }
 
@@ -387,10 +391,26 @@ impl PortalClient {
         h
     }
 
+    /// Build the API endpoint URL: https://{host}/portal.php
+    fn api_url(&self) -> String {
+        let parsed = url::Url::parse(&self.base_url).ok();
+        let scheme = parsed.as_ref().and_then(|u| {
+            if u.scheme() == "http" { Some("https") } else { Some(u.scheme()) }
+        }).unwrap_or("https");
+        let host = parsed.as_ref().and_then(|u| u.host_str()).unwrap_or("");
+        format!("{}://{}/portal.php", scheme, host)
+    }
+
     pub async fn handshake(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}?type=stb&action=handshake&token={}&JsHttpRequest=1-xml", self.base_url, self.token);
-        let resp = self.client.get(&url)
+        let url = format!("{}?type=stb&action=handshake&JsHttpRequest=1-xml", self.api_url());
+        let params = [
+            ("mac", &self.mac),
+            ("sn", &self.serial_number),
+            ("stb_type", &self.model),
+        ];
+        let resp = self.client.post(&url)
             .headers(self.headers())
+            .form(&params)
             .send()
             .await?;
         let text = resp.text().await?;
@@ -423,54 +443,68 @@ impl PortalClient {
         }
         let (_sn, d1, d2, _ua, _tz) = self.get_stealth_params();
         let hw_version = Self::calculate_hw_version(&self.mac);
+        let url = format!("{}?type=stb&action=do_auth&JsHttpRequest=1-xml", self.api_url());
         let params = [
-            ("type", "stb"),
-            ("action", "do_auth"),
             ("login", &self.username),
             ("password", &self.password),
             ("device_id", &d1),
             ("device_id2", &d2),
+            ("mac", &self.mac),
+            ("sn", &self.serial_number),
+            ("stb_type", &self.model),
             ("hw_version_2", &hw_version),
-            ("api_signature", Self::api_signature()),
-            ("JsHttpRequest", "1-xml"),
+            ("api_signature", &Self::api_signature().to_string()),
         ];
-        let resp = self.client.post(&self.base_url)
+        let resp = self.client.post(&url)
             .headers(self.headers())
             .form(&params)
             .send()
             .await?;
         let text = resp.text().await?;
-        tracing::info!("do_auth raw response (first 500): {}", &text.chars().take(500).collect::<String>());
-        #[derive(Deserialize)]
-        struct AuthResp { js: serde_json::Value, text: Option<String> }
-        let parsed: AuthResp = serde_json::from_str(&text)?;
-        if let Some(ref msg) = parsed.text {
-            tracing::info!("Login: {}", msg);
+        if text.is_empty() {
+            tracing::info!("do_auth returned empty body (device-id auth accepted)");
         }
-        // Accept auth if js contains a truthy token, or js itself is truthy
-        let ok = match &parsed.js {
-            serde_json::Value::Bool(b) => *b,
-            serde_json::Value::Object(m) => {
-                m.get("token").and_then(|t| t.as_str()).map(|s| !s.is_empty()).unwrap_or(false)
-                    || m.get("id").and_then(|t| t.as_str()).map(|s| !s.is_empty()).unwrap_or(false)
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+            let ok = match &parsed {
+                serde_json::Value::Bool(b) => *b,
+                serde_json::Value::Object(m) => {
+                    m.get("js").and_then(|v| {
+                        v.get("token").and_then(|t| t.as_str()).map(|s| !s.is_empty())
+                            .or_else(|| v.get("id").and_then(|t| t.as_str()).map(|s| !s.is_empty()))
+                    }).unwrap_or(false)
+                        || m.get("token").and_then(|t| t.as_str()).map(|s| !s.is_empty()).unwrap_or(false)
+                }
+                _ => false,
+            };
+            if ok {
+                if let Some(txt) = parsed.get("text").and_then(|v| v.as_str()) {
+                    return Ok(txt.to_string());
+                }
+                return Ok("authenticated".into());
             }
-            _ => false,
-        };
-        if ok { Ok(parsed.text.unwrap_or_default()) } else { Err("Invalid credentials".into()) }
+        }
+        // Some portals return empty body on success (device-id auth mode)
+        if text.is_empty() { return Ok("authenticated".into()); }
+        Err("Invalid credentials".into())
     }
 
     async fn authenticate_device_id(&mut self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         self.handshake().await?;
-        let (sn, d1, d2, _ua, _tz) = self.get_stealth_params();
+        let (_sn, d1, d2, _ua, _tz) = self.get_stealth_params();
         let hw_version = Self::calculate_hw_version(&self.mac);
-        let url = format!(
-            "{}?type=stb&action=get_profile&JsHttpRequest=1-xml&hd=1&sn={}&stb_type={}&device_id={}&device_id2={}&hw_version_2={}&api_signature={}&auth_second_step=1",
-            self.base_url, urlencoding(&sn), urlencoding(&self.model),
-            urlencoding(&d1), urlencoding(&d2),
-            urlencoding(&hw_version), urlencoding(Self::api_signature())
-        );
-        let resp = self.client.get(&url)
+        let url = format!("{}?type=stb&action=get_profile&JsHttpRequest=1-xml&hd=1&auth_second_step=1", self.api_url());
+        let params = [
+            ("sn", self.serial_number.as_str()),
+            ("stb_type", self.model.as_str()),
+            ("device_id", &d1),
+            ("device_id2", &d2),
+            ("mac", self.mac.as_str()),
+            ("hw_version_2", &hw_version),
+            ("api_signature", Self::api_signature()),
+        ];
+        let resp = self.client.post(&url)
             .headers(self.headers())
+            .form(&params)
             .send()
             .await?;
         let text = resp.text().await?;
@@ -491,8 +525,12 @@ impl PortalClient {
     }
 
     pub async fn get_channels(&self) -> Result<Vec<Channel>, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}?type=itv&action=get_all_channels&JsHttpRequest=1-xml", self.base_url);
-        let mut req = self.client.get(&url).headers(self.headers());
+        let url = format!("{}?type=itv&action=get_all_channels&JsHttpRequest=1-xml", self.api_url());
+        let params = [
+            ("mac", self.mac.as_str()),
+            ("sn", self.serial_number.as_str()),
+        ];
+        let mut req = self.client.post(&url).headers(self.headers()).form(&params);
         // ETag conditional request: avoid re-downloading unchanged channel lists.
         if let Some(etag) = self.etags.read().await.get("channels") {
             req = req.header("If-None-Match", etag);
@@ -552,9 +590,11 @@ impl PortalClient {
     }
 
     async fn get_genres(&self) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}?action=get_genres&type=itv&JsHttpRequest=1-xml", self.base_url);
-        let resp = self.client.get(&url)
+        let url = format!("{}?action=get_genres&type=itv&JsHttpRequest=1-xml", self.api_url());
+        let params = [("mac", self.mac.as_str()), ("sn", self.serial_number.as_str())];
+        let resp = self.client.post(&url)
             .headers(self.headers())
+            .form(&params)
             .send()
             .await?;
         let text = resp.text().await?;
@@ -575,9 +615,11 @@ impl PortalClient {
     }
 
     async fn get_categories(&self, media_type: &str) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}?action=get_categories&type={}&JsHttpRequest=1-xml", self.base_url, media_type);
-        let resp = self.client.get(&url)
+        let url = format!("{}?action=get_categories&type={}&JsHttpRequest=1-xml", self.api_url(), media_type);
+        let params = [("mac", self.mac.as_str()), ("sn", self.serial_number.as_str())];
+        let resp = self.client.post(&url)
             .headers(self.headers())
+            .form(&params)
             .send()
             .await?;
         let text = resp.text().await?;
@@ -588,13 +630,31 @@ impl PortalClient {
     }
 
     pub async fn create_link(&self, cmd: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let encoded_cmd: String = cmd.split_whitespace()
-            .map(|s| urlencoding(s))
-            .collect::<Vec<_>>()
-            .join("%20");
-        let url = format!("{}?action=create_link&type=itv&cmd={}&JsHttpRequest=1-xml", self.base_url, encoded_cmd);
-        let resp = self.client.get(&url)
+        // Extract stream ID from the cmd URL to send as a separate form field.
+        // The portal's create_link parser splits the cmd at embedded & characters,
+        // so stream=XXXXX must be a top-level POST parameter, not URL-encoded inside cmd.
+        let stream_id = crate::proxy::extract_stream_id(cmd);
+        let url = format!("{}?type=itv&action=create_link&JsHttpRequest=1-xml", self.api_url());
+        // Build the raw form body manually — reqwest's .form() URL-encodes & in cmd values
+        // which prevents the portal from extracting stream/mac/sn from inside the cmd URL.
+        // Send cmd RAW — the portal's PHP parser splits embedded &params
+        // as top-level form fields. URL-encoding the cmd would hide stream=XXXXX
+        // from the parser, making it return stream= (empty).
+        let body_str = if stream_id.is_empty() {
+            format!(
+                "cmd={}&mac={}&sn={}&stb_type={}",
+                cmd, urlencoding(&self.mac), urlencoding(&self.serial_number), urlencoding(&self.model)
+            )
+        } else {
+            format!(
+                "cmd={}&mac={}&sn={}&stb_type={}&stream={}",
+                cmd, urlencoding(&self.mac), urlencoding(&self.serial_number), urlencoding(&self.model), &stream_id
+            )
+        };
+        let resp = self.client.post(&url)
             .headers(self.headers())
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(body_str)
             .send()
             .await?;
         let text = resp.text().await?;
@@ -638,13 +698,53 @@ impl PortalClient {
     }
 
     pub async fn watchdog_update(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}?action=get_events&event_active_id=0&init=0&type=watchdog&cur_play_type=1&JsHttpRequest=1-xml", self.base_url);
-        let resp = self.client.get(&url)
+        let url = format!("{}?action=get_events&event_active_id=0&init=0&type=watchdog&cur_play_type=1&JsHttpRequest=1-xml", self.api_url());
+        let params = [("mac", self.mac.as_str()), ("sn", self.serial_number.as_str())];
+        let resp = self.client.post(&url)
             .headers(self.headers())
+            .form(&params)
             .send()
             .await?;
         let _ = resp.text().await?;
         Ok(())
+    }
+
+    /// Fetch a stream using the internal HTTP client (same TLS session as API calls).
+    pub async fn fetch_stream(&self, cmd: &str) -> Result<(Vec<u8>, reqwest::header::HeaderMap), Box<dyn std::error::Error + Send + Sync>> {
+        let host_str = url::Url::parse(&self.base_url).ok()
+            .and_then(|u| u.host_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let (_, tz) = crate::dns::get_sticky_european_identity(&host_str);
+        let stream_id = crate::proxy::extract_stream_id(cmd);
+        let stream_url = format!(
+            "https://{}/play/live.php?mac={}&stream={}&extension=ts&play_token=warm",
+            host_str, &self.mac, stream_id
+        );
+        let ua = format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 250 Mobile Safari/533.3", self.model);
+        let cookie = format!("PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};", &self.serial_number, &self.mac, tz);
+
+        // Do a quick handshake first on the SAME client to warm the connection
+        let warmup_url = format!("https://{}/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml", host_str);
+        let _ = self.client.post(&warmup_url)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header("User-Agent", &ua)
+            .form(&[("mac", &self.mac), ("sn", &self.serial_number), ("stb_type", &self.model)])
+            .send().await;
+
+        // Now fetch the stream — connection pool should reuse the warm connection
+        let resp = self.client.get(&stream_url)
+            .header("User-Agent", &ua)
+            .header("Cookie", &cookie)
+            .header("Accept", "*/*")
+            .send().await?;
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = resp.bytes().await?.to_vec();
+        if status.as_u16() >= 400 {
+            let preview = String::from_utf8_lossy(&body).chars().take(200).collect::<String>();
+            return Err(format!("Stream HTTP {}: {}", status.as_u16(), preview).into());
+        }
+        Ok((body, headers))
     }
 
     /// Produce a lightweight clone that can send the watchdog ping without
@@ -702,8 +802,9 @@ pub struct EpgEntry {
 impl PortalClient {
     pub async fn get_epg_for_channel(&self, cmd: &str) -> Result<Vec<EpgEntry>, Box<dyn std::error::Error + Send + Sync>> {
         let encoded: String = cmd.split_whitespace().map(|s| urlencoding(s)).collect::<Vec<_>>().join("%20");
-        let url = format!("{}?type=itv&action=get_epg_info&period=5&cmd={}&JsHttpRequest=1-xml", self.base_url, encoded);
-        let resp = self.client.get(&url).headers(self.headers()).send().await?;
+        let url = format!("{}?type=itv&action=get_epg_info&period=5&cmd={}&JsHttpRequest=1-xml", self.api_url(), encoded);
+        let params = [("mac", self.mac.as_str()), ("sn", self.serial_number.as_str())];
+        let resp = self.client.post(&url).headers(self.headers()).form(&params).send().await?;
         let text = resp.text().await?;
         #[derive(Deserialize)] struct EpgJs { data: Option<serde_json::Value> }
         #[derive(Deserialize)] struct EpgWrap { js: EpgJs }
@@ -723,8 +824,9 @@ impl PortalClient {
     }
 
     pub async fn get_epg_all(&self) -> Result<Vec<EpgEntry>, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}?type=itv&action=get_epg_info&period=5&JsHttpRequest=1-xml", self.base_url);
-        let resp = self.client.get(&url).headers(self.headers()).send().await?;
+        let url = format!("{}?type=itv&action=get_epg_info&period=5&JsHttpRequest=1-xml", self.api_url());
+        let params = [("mac", self.mac.as_str()), ("sn", self.serial_number.as_str())];
+        let resp = self.client.post(&url).headers(self.headers()).form(&params).send().await?;
         let text = resp.text().await?;
         #[derive(Deserialize)] struct EpgJs { data: Option<serde_json::Value> }
         #[derive(Deserialize)] struct EpgWrap { js: EpgJs }
