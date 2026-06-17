@@ -351,17 +351,7 @@ async fn proxy_handler(
     }
 
     // Metrics MAC/serial rewriting
-    let mut metrics_rewritten = false;
-    if let Some(metrics_val) = query.extra.get("metrics") {
-        if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(metrics_val) {
-            if let Some(obj) = v.as_object_mut() {
-                if obj.contains_key("mac") { obj.insert("mac".to_string(), serde_json::Value::String(st.mac.clone())); }
-                if obj.contains_key("sn")  { obj.insert("sn".to_string(),  serde_json::Value::String(st.serial_number.clone())); }
-                query_params.push(("metrics".to_string(), v.to_string()));
-                metrics_rewritten = true;
-            }
-        }
-    }
+    crate::mag::scrub_metrics(&mut query_params, &st.serial_number, &st.mac);
 
     // Append remaining extra params (excluding ones already handled)
     let handled = ["type", "action", "cmd", "sn", "device_id", "device_id2", "signature", "metrics"];

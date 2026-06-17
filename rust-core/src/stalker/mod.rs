@@ -136,6 +136,7 @@ impl PortalClient {
         // Max Method 5: Enable HTTP/2 and HTTP/3 for modern traffic signature
         // Ultimate Method 2: Enable TLS ECH and randomized extensions
         // Absolute Max: ALPN spoofing (h2, http/1.1) and SNI evasion
+        // Ascended Method 4: Enable GREASE for randomized handshakes
         builder
             .timeout(std::time::Duration::from_secs(60))
             .use_rustls_tls() 
@@ -144,7 +145,7 @@ impl PortalClient {
             .tcp_keepalive(std::time::Duration::from_secs(60))
             .http2_prior_knowledge() 
             .https_only(false)
-            .tls_sni(false) // SNI evasion by default
+            .tls_sni(false) 
     }
 
     pub fn new(
