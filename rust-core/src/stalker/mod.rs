@@ -21,20 +21,22 @@ impl WatchdogClient {
             "{}?action=get_events&event_active_id=0&init=0&type=watchdog&cur_play_type=1&JsHttpRequest=1-xml",
             self.base_url
         );
-        let host = url::Url::parse(&self.base_url).map(|u| u.host_str().unwrap_or("")).unwrap_or("");
-        let (eur_ip, eur_tz) = dns::get_sticky_european_identity(host);
+        let host_str = url::Url::parse(&self.base_url).ok().and_then(|u| u.host_str().map(|s| s.to_string())).unwrap_or_default();
+        let (eur_ip, eur_tz) = dns::get_sticky_european_identity(&host_str);
         
         use reqwest::header::*;
         let mut h = HeaderMap::new();
         h.insert(ACCEPT, HeaderValue::from_static("*/*"));
         h.insert("Cache-Control", HeaderValue::from_static("no-cache"));
-        
+
         // Absolute Method 1: Packet Length Obfuscation
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let padding_len = rng.gen_range(32..128);
-        let padding: String = (0..padding_len).map(|_| (rng.gen_range(33..126) as u8) as char).collect();
-        h.insert("X-DPI-Padding", HeaderValue::from_str(&padding).unwrap());
+        {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            let padding_len = rng.gen_range(32..128);
+            let padding: String = (0..padding_len).map(|_| (rng.gen_range(33..126) as u8) as char).collect();
+            h.insert("X-DPI-Padding", HeaderValue::from_str(&padding).unwrap());
+        }
 
         h.insert("X-User-Agent", HeaderValue::from_str(&format!("Model: {}; Link: Ethernet", self.model)).unwrap());
         h.insert("X-Forwarded-For", HeaderValue::from_str(&eur_ip).unwrap());
@@ -79,6 +81,26 @@ impl Channel {
     }
 }
 
+/// Model-specific fingerprint parameters for realistic User-Agent blending.
+#[derive(Debug, Clone)]
+pub struct ModelFingerprint {
+    pub webkit_ver: &'static str,
+    pub safari_ver: &'static str,
+    pub stbapp_major: u32,
+    pub rev_base: u32,
+    pub rev_range: u32,
+}
+
+pub(crate) fn model_fingerprint(model: &str) -> ModelFingerprint {
+    match model {
+        "MAG250" => ModelFingerprint { webkit_ver: "533.3", safari_ver: "533.3", stbapp_major: 2, rev_base: 380, rev_range: 20 },
+        "MAG256" => ModelFingerprint { webkit_ver: "537.21", safari_ver: "537.21", stbapp_major: 4, rev_base: 180, rev_range: 30 },
+        "MAG322" => ModelFingerprint { webkit_ver: "602.1", safari_ver: "602.1", stbapp_major: 4, rev_base: 120, rev_range: 25 },
+        "MAG424" => ModelFingerprint { webkit_ver: "605.1", safari_ver: "605.1", stbapp_major: 4, rev_base:  85, rev_range: 20 },
+        _            => ModelFingerprint { webkit_ver: "533.3", safari_ver: "533.3", stbapp_major: 4, rev_base: 230, rev_range: 30 },
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PortalClient {
     pub base_url: String,
@@ -96,6 +118,9 @@ pub struct PortalClient {
     pub device_id_auth: bool,
     pub incarnation: u32,
     client: reqwest::Client,
+    /// ETag cache: stores the latest ETag value per endpoint path for conditional requests.
+    /// Prevents re-downloading unchanged data (channel lists, EPG, categories).
+    etags: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
 }
 
 impl PortalClient {
@@ -106,13 +131,22 @@ impl PortalClient {
         self.token.clear();
         
         // Clear sticky identity for this host to force a new European IP/TZ
-        let host = url::Url::parse(&self.base_url).map(|u| u.host_str().unwrap_or("")).unwrap_or("");
-        if !host.is_empty() {
-            let mut cache = crate::dns::IDENTITY_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-            cache.remove(host);
+        let host_str = url::Url::parse(&self.base_url).ok().and_then(|u| u.host_str().map(|s| s.to_string())).unwrap_or_default();
+        if !host_str.is_empty() {
+            crate::dns::clear_sticky_identity(&host_str);
         }
         
         tracing::info!("[STALKER] Identity Multiversing triggered (Incarnation: {})", self.incarnation);
+    }
+
+    fn get_stealth_params(&self) -> (String, String, String, String, String) {
+        (
+            self.serial_number.clone(),
+            self.device_id.clone(),
+            self.device_id2.clone(),
+            format!("Model: {}; Link: Ethernet", self.model),
+            self.timezone.clone(),
+        )
     }
 
     /// Decrypt a portal link if it is encrypted with AES-128-CBC.
@@ -170,7 +204,8 @@ impl PortalClient {
 
     /// Ensure the MAC address is a valid 12-digit hex string with colons.
     /// If the input is a valid 12-digit hex string, we preserve it.
-    /// If it is shorter, we pad it with the Infomir OUI (00:1A:79).
+    /// If it is shorter, we pad it with one of Infomir's real OUI prefixes.
+    /// Known Infomir OUIs used on MAG hardware: 00:1A:79, 00:1E:5F, 08:00:28, C8:2E:46
     fn repair_mac(mac: &str) -> String {
         let clean: String = mac.chars()
             .filter(|c| c.is_ascii_hexdigit())
@@ -180,13 +215,16 @@ impl PortalClient {
         let final_mac = if clean.len() == 12 {
             clean
         } else {
-            // Not a standard length, use MAG prefix and take what we can from the end
-            let suffix = if clean.len() >= 6 { 
-                &clean[clean.len()-6..] 
-            } else { 
-                "ABCDEF" 
+            // Real Infomir-assigned OUI prefixes (IEEE MA-L registry)
+            let ouis = ["001A79", "001E5F", "080028", "C82E46"];
+            use rand::Rng;
+            let oui = ouis[rand::thread_rng().gen_range(0..ouis.len())];
+            let suffix = if clean.len() >= 6 {
+                &clean[clean.len()-6..]
+            } else {
+                "ABCDEF"
             };
-            format!("001A79{}", suffix)
+            format!("{}{}", oui, suffix)
         };
 
         let mut formatted = String::with_capacity(17);
@@ -199,40 +237,29 @@ impl PortalClient {
 
     pub fn configure_stealth_client(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
         // --- THE ABSOLUTE (v2.2.0) ---
-        
-        // Absolute Method 2: JA3 Perfect Mirroring (MAG254 Ministra 5.6.1)
-        // Handshake: 771,49195-49199-49196-49200-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-21,29-23-24,0
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.0.iter().map(|ta| {
-            rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(ta.subject, ta.spki, ta.name_constraints)
-        }));
-
-        // Explicit MAG254 Cipher Suites in priority order
-        let cipher_suites = vec![
-            rustls::cipher_suite::TLS13_AES_128_GCM_SHA256, // Modern fallback
-            rustls::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-            rustls::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-            rustls::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-            rustls::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-        ];
-
-        let mut tls_config = rustls::ClientConfig::builder()
-            .with_cipher_suites(&cipher_suites)
-            .with_safe_default_kx_groups()
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_root_store(root_store)
-            .with_no_client_auth();
-            
-        tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        //
+        // Absolute Method 2: JA3 Soft Mirroring — use reqwest's built-in rustls
+        // backend with TLS 1.0-1.2 to match MAG254 TLS fingerprint.
+        // Hard cipher-suite pinning was lost in the rustls 0.21→0.23 upgrade,
+        // but reqwest/rustls 0.23 defaults are close enough for most CDNs.
 
         builder
             .timeout(std::time::Duration::from_secs(60))
-            .use_preconfigured_tls(tls_config)
+            .use_rustls_tls()
+            .min_tls_version(reqwest::tls::Version::TLS_1_0)
+            .max_tls_version(reqwest::tls::Version::TLS_1_2)
             .tcp_keepalive(std::time::Duration::from_secs(60))
-            .http2_prior_knowledge() 
-            .https_only(false)
-            .tls_sni(false) 
+            // HTTP/2 SETTINGS fingerprint matching (MAG254 WebKit defaults)
+            .http2_initial_stream_window_size(65535)
+            .http2_initial_connection_window_size(1048576)
+            .http2_max_frame_size(16384)
+            .http2_keep_alive_interval(std::time::Duration::from_secs(30))
+            .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
+            // TCP stack fingerprinting
+            .tcp_nodelay(true)           // MAG254 disables Nagle's algorithm
+            .https_only(false)           // allow HTTP connections
+            .tls_sni(false)
+            .local_address(Some(std::net::Ipv4Addr::UNSPECIFIED.into()))
     }
 
     pub fn new(
@@ -268,20 +295,25 @@ impl PortalClient {
             device_id2 = format!("{}{}", device_id2, branch);
         }
 
-        let ua = format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: {} Mobile Safari/533.3", model, rev);
+        let fp = model_fingerprint(&model);
+        let ua = format!(
+            "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/{} (KHTML, like Gecko) {} stbapp ver: {} rev: {} Mobile Safari/{}",
+            fp.webkit_ver, model, fp.stbapp_major, rev, fp.safari_ver
+        );
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .user_agent(ua)
             .danger_accept_invalid_certs(false);
-        
+
         builder = Self::configure_stealth_client(builder);
-        
+
         let client = builder.build().expect("Failed to build HTTP client");
 
         Self {
             base_url, mac, username, password, serial_number, device_id,
             device_id2, signature, model, timezone, device_id_auth,
             token: String::new(), incarnation: 0, client,
+            etags: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -296,12 +328,16 @@ impl PortalClient {
         let port = parsed.port_or_known_default().unwrap_or(443);
         let ips = dns::resolve_european(&host).await;
 
-        let ua = format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 2034 Mobile Safari/533.3", self.model);
+        let fp = model_fingerprint(&self.model);
+        let ua = format!(
+            "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/{} (KHTML, like Gecko) {} stbapp ver: {} rev: 2034 Mobile Safari/{}",
+            fp.webkit_ver, self.model, fp.stbapp_major, fp.safari_ver
+        );
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .user_agent(ua)
             .danger_accept_invalid_certs(false);
-            
+
         builder = Self::configure_stealth_client(builder);
 
         if !ips.is_empty() {
@@ -321,25 +357,26 @@ impl PortalClient {
         h.insert("Pragma", HeaderValue::from_static("no-cache"));
 
         // Absolute Method 1: Packet Length Obfuscation
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let padding_len = rng.gen_range(32..128);
-        let padding: String = (0..padding_len).map(|_| (rng.gen_range(33..126) as u8) as char).collect();
-        h.insert("X-DPI-Padding", HeaderValue::from_str(&padding).unwrap());
+        {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            let padding_len = rng.gen_range(32..128);
+            let padding: String = (0..padding_len).map(|_| (rng.gen_range(33..126) as u8) as char).collect();
+            h.insert("X-DPI-Padding", HeaderValue::from_str(&padding).unwrap());
+        }
 
         h.insert("X-User-Agent", HeaderValue::from_str(&format!("Model: {}; Link: Ethernet", self.model)).unwrap());
-        
-        let host = url::Url::parse(&self.base_url).map(|u| u.host_str().unwrap_or("")).unwrap_or("");
-        let (eur_ip, eur_tz) = dns::get_sticky_european_identity(host);
-        
-        h.insert("X-Forwarded-For", HeaderValue::from_str(&eur_ip).unwrap());
-        h.insert("X-Real-IP", HeaderValue::from_str(&eur_ip).unwrap());
-        h.insert("CF-Connecting-IP", HeaderValue::from_str(&eur_ip).unwrap());
-        h.insert("True-Client-IP", HeaderValue::from_str(&eur_ip).unwrap());
-        h.insert("X-Originating-IP", HeaderValue::from_str(&eur_ip).unwrap());
+
+        // NOTE: European IP spoofing headers are intentionally NOT sent here.
+        // They are applied by mag::apply_mag_headers() in the proxy/HLS layer where
+        // we impersonate a European STB. Sending them from PortalClient's own API
+        // calls triggers Cloudflare WAF (error 1000 / 401) for header injection.
+
         if !self.token.is_empty() {
             h.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", self.token)).unwrap());
         }
+        let host_str = url::Url::parse(&self.base_url).ok().and_then(|u| u.host_str().map(|s| s.to_string())).unwrap_or_default();
+        let (_, eur_tz) = dns::get_sticky_european_identity(&host_str);
         let cookie = format!(
             "PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};",
             urlencoding(&self.serial_number),
@@ -384,7 +421,7 @@ impl PortalClient {
         if self.handshake().await.is_err() {
             tracing::warn!("Handshake failed, continuing anyway");
         }
-        let (sn, d1, d2, _ua, _tz) = self.get_stealth_params();
+        let (_sn, d1, d2, _ua, _tz) = self.get_stealth_params();
         let hw_version = Self::calculate_hw_version(&self.mac);
         let params = [
             ("type", "stb"),
@@ -455,10 +492,15 @@ impl PortalClient {
 
     pub async fn get_channels(&self) -> Result<Vec<Channel>, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}?type=itv&action=get_all_channels&JsHttpRequest=1-xml", self.base_url);
-        let resp = self.client.get(&url)
-            .headers(self.headers())
-            .send()
-            .await?;
+        let mut req = self.client.get(&url).headers(self.headers());
+        // ETag conditional request: avoid re-downloading unchanged channel lists.
+        if let Some(etag) = self.etags.read().await.get("channels") {
+            req = req.header("If-None-Match", etag);
+        }
+        let resp = req.send().await?;
+        if let Some(etag) = resp.headers().get(reqwest::header::ETAG).and_then(|v| v.to_str().ok()) {
+            self.etags.write().await.insert("channels".into(), etag.to_string());
+        }
         let text = resp.text().await?;
         let genres = self.get_genres().await.unwrap_or_default();
 
@@ -634,7 +676,7 @@ impl PortalClient {
     }
 }
 
-fn urlencoding(s: &str) -> String {
+pub(crate) fn urlencoding(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for &b in s.as_bytes() {
         match b {

@@ -25,9 +25,11 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 aes = "0.8"
 cbc = "0.1"
+webpki-roots = "0.25"
 url = "2"
 regex = "1"
 rand = "0.8"
+sha1 = "0.10"
 thiserror = "1"
 jni = { version = "0.21", optional = true }
 android_logger = { version = "0.14", optional = true }

@@ -3,12 +3,13 @@ use axum::{
     extract::{Query, State},
     http::{HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
-    routing::{any, get},
+    routing::{any},
     Router,
 };
 use serde_json;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -41,6 +42,10 @@ pub struct ProxyState {
     pub portal_client: Arc<RwLock<stalker::PortalClient>>,
     /// Shared HTTP client for portal API proxying (no auto-redirect, 300s timeout).
     pub portal_http_client: reqwest::Client,
+    /// Watchdog event counter: monotonically increments per watchdog ping, mimicking real MAG254 behaviour.
+    pub event_active_id: Arc<AtomicU64>,
+    /// Current play type reported by the STB: 0 = idle, 1 = ITV, 2 = VOD, 3 = timeshift.
+    pub cur_play_type: Arc<AtomicU8>,
 }
 
 pub fn build_router(
@@ -81,17 +86,12 @@ pub fn build_router(
     };
 
     let portal_http_client = {
-        let mut builder = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .redirect(reqwest::redirect::Policy::none());
-        
-        // Apply stealth TLS and socket settings (Methods 1 & 5)
-        builder = builder
-            .use_rustls_tls()
-            .min_tls_version(reqwest::tls::Version::TLS_1_0)
-            .max_tls_version(reqwest::tls::Version::TLS_1_2)
-            .tcp_keepalive(Duration::from_secs(60));
-            
+
+        let builder = stalker::PortalClient::configure_stealth_client(builder);
+
         builder.build().unwrap_or_default()
     };
 
@@ -115,6 +115,8 @@ pub fn build_router(
         series_categories,
         portal_client,
         portal_http_client,
+        event_active_id: Arc::new(AtomicU64::new(0)),
+        cur_play_type: Arc::new(AtomicU8::new(0)),
     };
 
     Router::new()
@@ -159,11 +161,15 @@ async fn proxy_handler(
             }
             "get_events" => {
                 if query.r#type.as_deref() == Some("watchdog") {
+                    let event_id = st.event_active_id.fetch_add(1, Ordering::SeqCst);
+                    let play_type = st.cur_play_type.load(Ordering::SeqCst);
+                    let body = format!(
+                        r#"{{"js":{{"data":{{"msgs":0,"additional_services_on":"1","cur_play_type":"{}","event_active_id":{},"id":{}}},"text":"generated in: 0.01s"}}}}"#,
+                        play_type, event_id, event_id
+                    );
                     return Response::builder()
                         .header("Content-Type", "application/json")
-                        .body(Body::from(
-                            r#"{"js":{"data":{"msgs":0,"additional_services_on":"1"}},"text":"generated in: 0.01s"}"#,
-                        ))
+                        .body(Body::from(body))
                         .unwrap();
                 }
                 if query.r#type.as_deref() == Some("log") {
@@ -351,7 +357,7 @@ async fn proxy_handler(
     }
 
     // Metrics MAC/serial rewriting
-    crate::mag::scrub_metrics(&mut query_params, &st.serial_number, &st.mac);
+    let metrics_rewritten = crate::mag::scrub_metrics(&mut query_params, &st.serial_number, &st.mac);
 
     // Append remaining extra params (excluding ones already handled)
     let handled = ["type", "action", "cmd", "sn", "device_id", "device_id2", "signature", "metrics"];
@@ -407,15 +413,14 @@ async fn proxy_handler(
                 .timeout(Duration::from_secs(60))
                 .redirect(reqwest::redirect::Policy::none())
                 .resolve(&current_host, SocketAddr::new(eur_ips[0], current_port));
-            
+
             builder = stalker::PortalClient::configure_stealth_client(builder);
-            
+
             match builder.build() {
                 Ok(c) => { pinned_client = Some(c); client = pinned_client.as_ref().unwrap(); }
-                Err(_) => { pinned_client = None; client = &st.portal_http_client; }
+                Err(_) => { client = &st.portal_http_client; }
             }
         } else {
-            pinned_client = None;
             client = &st.portal_http_client;
         }
 
@@ -440,6 +445,7 @@ async fn proxy_handler(
         }
 
         // Apply MAG headers
+        let current_token = st.token.read().await.clone();
         proxy_req = crate::mag::apply_mag_headers(
             proxy_req, &current_token, &st.serial_number, &st.mac, &st.timezone, &st.model, &current_host
         );
@@ -490,7 +496,7 @@ async fn proxy_handler(
     // Handle 458 (Cloudflare ban) — refresh channels and retry for create_link
     if is_458 && query.action.as_deref() == Some("create_link") {
         tracing::warn!("[PROXY] got 458 for create_link, refreshing channels...");
-        match proxy_refresh_and_retry(&st, &query, &headers, &current_url, &client).await {
+        match proxy_refresh_and_retry(&st, &query, &headers, &current_url, &st.portal_http_client).await {
             Ok(r) => return r,
             Err(e) => {
                 tracing::error!("Proxy 458 retry failed: {e}");
@@ -633,9 +639,10 @@ async fn proxy_refresh_and_retry(
             _ => { proxy_req = proxy_req.header(key, val); }
         }
     }
+    let host_str = url::Url::parse(&fresh_url).ok().and_then(|u| u.host_str().map(|s| s.to_string())).unwrap_or_default();
     proxy_req = crate::mag::apply_mag_headers(
         proxy_req, &fresh_token, &st.serial_number, &st.mac, &st.timezone, &st.model,
-        url::Url::parse(&fresh_url).map(|u| u.host_str().unwrap_or("")).unwrap_or("")
+        &host_str
     );
     let referer_host = st.portal_base.trim_end_matches('/');
     proxy_req = proxy_req.header("Referer", format!("{}/", referer_host))

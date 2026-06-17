@@ -89,7 +89,7 @@ pub fn build_router(
 async fn logo_handler(
     State(st): State<HlsState>,
     Path(path): Path<String>,
-) -> Response {
+) -> impl IntoResponse {
     let logo_path = url_decode(&path);
     let target_url = {
         let client = st.portal_client.read().await;
@@ -187,11 +187,18 @@ async fn channel_handler(
     State(st): State<HlsState>,
     Path(path): Path<String>,
     req: Request<Body>,
-) -> Response {
+) -> impl IntoResponse {
     tracing::info!("[HLS] channel request: {}", &path);
     let parts: Vec<&str> = path.splitn(2, '/').collect();
     let title = url_decode(parts[0]);
     let suffix = parts.get(1).copied().unwrap_or("");
+
+    // HLS cadence: small organic latency variance mimics real CDN jitter (5-25ms)
+    {
+        use rand::Rng;
+        let jitter_ms = rand::thread_rng().gen_range(5..25);
+        tokio::time::sleep(std::time::Duration::from_millis(jitter_ms)).await;
+    }
 
     // Lookup channel index by title
     let idx = {
@@ -273,7 +280,7 @@ async fn channel_handler(
 
 async fn epg_handler(
     State(st): State<HlsState>,
-) -> Response {
+) -> impl IntoResponse {
     tracing::info!("[HLS] EPG requested");
     let portal_url = {
         let client = st.portal_client.read().await;
@@ -449,7 +456,7 @@ async fn proxy_request(
             client_ref = shared_client;
         }
 
-        let req = client_ref.get(&current_url);
+        let mut req = client_ref.get(&current_url);
         req = crate::mag::apply_mag_headers(req, token, serial_number, mac, timezone, model, &current_host);
         tracing::info!("[HLS] fetch (hop {}/{}): {}", hop, max_redirects, current_url);
         let resp = req.send().await?;

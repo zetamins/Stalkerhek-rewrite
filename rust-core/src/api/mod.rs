@@ -1,6 +1,7 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
@@ -12,7 +13,14 @@ use tokio::sync::RwLock;
 use crate::{AppState, ProfileConfig, ProfileRunner, ProfileStatus};
 use crate::hls;
 use crate::proxy;
-use crate::stalker;
+use crate::stalker::{self, urlencoding};
+
+/// Randomized inter-request delay to mimic organic STB API cadence.
+async fn cadence_delay(range: std::ops::Range<u64>) {
+    use rand::Rng;
+    let ms = rand::thread_rng().gen_range(range);
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+}
 
 pub(crate) fn save_profiles(profiles: &[ProfileConfig], data_dir: &std::path::Path) {
     if let Ok(data) = serde_json::to_string_pretty(profiles) {
@@ -70,7 +78,7 @@ pub fn load_profiles(data_dir: &std::path::Path) -> Vec<ProfileConfig> {
         .unwrap_or_default()
 }
 
-pub fn build_router(state: AppState) -> Router {
+pub fn build_router() -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
         .route("/api/v1/profile", post(create_profile))
@@ -85,18 +93,16 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/filters/sync", post(sync_filters))
         .route("/api/v1/filters/reset/:id", post(reset_filters))
         .route("/api/v1/settings/runtime", get(get_runtime_settings).post(set_runtime_settings))
-        .with_state(state)
-        .layer(tower_http::trace::TraceLayer::new_for_http())
 }
 
-async fn health() -> Json<serde_json::Value> {
+async fn health() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "ok",
         "service": "stalkerhek-engine"
     }))
 }
 
-async fn list_profiles(State(st): State<AppState>) -> Json<Vec<ProfileConfig>> {
+async fn list_profiles(State(st): State<AppState>) -> impl IntoResponse {
     let profiles = st.profiles.read().await;
     Json(profiles.clone())
 }
@@ -127,7 +133,7 @@ struct CreateProfileRequest {
 async fn create_profile(
     State(st): State<AppState>,
     Json(req): Json<CreateProfileRequest>,
-) -> Result<Json<ProfileConfig>, StatusCode> {
+) -> impl IntoResponse {
     tracing::info!("create_profile called: {:?}", serde_json::to_string(&req).unwrap_or_default());
     let mut profiles = st.profiles.write().await;
     let new_id = req.id.unwrap_or_else(|| profiles.iter().map(|p| p.id).max().unwrap_or(0) + 1);
@@ -158,13 +164,13 @@ async fn create_profile(
     };
     profiles.push(cfg.clone());
     save_profiles(&profiles, &st.data_dir);
-    Ok(Json(cfg))
+    Json(cfg)
 }
 
 async fn get_profile(
     State(st): State<AppState>,
     Path(id): Path<i32>,
-) -> Result<Json<ProfileConfig>, StatusCode> {
+) -> impl IntoResponse {
     let profiles = st.profiles.read().await;
     profiles.iter().find(|p| p.id == id)
         .ok_or(StatusCode::NOT_FOUND)
@@ -203,7 +209,7 @@ async fn delete_profile(
 async fn start_profile(
     State(st): State<AppState>,
     Path(id): Path<i32>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> impl IntoResponse {
     start_profile_by_id(&st, id).await.map(Json)
 }
 
@@ -258,6 +264,10 @@ pub async fn start_profile_by_id(
         client.resolve_eu_dns().await;
     }
 
+    // Portal API cadence: realistic MAG254 boot-sequence inter-request delays.
+    // A real STB has processing gaps between API calls as it parses responses and updates state.
+    cadence_delay(150..400).await;
+
     // Authenticate
     {
         let mut client = portal_client.write().await;
@@ -266,6 +276,8 @@ pub async fn start_profile_by_id(
             return Err(StatusCode::UNAUTHORIZED);
         }
     }
+
+    cadence_delay(300..800).await;
 
     // Fetch channels
     let channels = {
@@ -282,11 +294,14 @@ pub async fn start_profile_by_id(
     let channel_count = channels.len();
     tracing::info!("Profile {}: got {} channels", id, channel_count);
 
+    cadence_delay(200..500).await;
+
     // Fetch VOD and Series categories
     let vod_categories = {
         let client = portal_client.read().await;
         client.get_vod_categories().await.unwrap_or_default()
     };
+    cadence_delay(100..300).await;
     let series_categories = {
         let client = portal_client.read().await;
         client.get_series_categories().await.unwrap_or_default()
@@ -471,7 +486,7 @@ pub async fn start_profile_by_id(
     }));
 
     let runner = ProfileRunner {
-        config: profile,
+        config: profile.clone(),
         cancel_hls: Some(hls_cancel_tx),
         cancel_proxy: Some(proxy_cancel_tx),
         cancel_watchdog: Some(watchdog_cancel_tx),
@@ -498,7 +513,7 @@ pub async fn start_profile_by_id(
 async fn stop_profile(
     State(st): State<AppState>,
     Path(id): Path<i32>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> impl IntoResponse {
     let mut runners = st.runners.write().await;
     if let Some(pos) = runners.iter().position(|r| r.config.id == id) {
         let runner = runners.swap_remove(pos);
@@ -520,7 +535,7 @@ async fn stop_profile(
 async fn profile_status(
     State(st): State<AppState>,
     Path(id): Path<i32>,
-) -> Json<serde_json::Value> {
+) -> impl IntoResponse {
     let runners = st.runners.read().await;
     if let Some(runner) = runners.iter().find(|r| r.config.id == id) {
         let status = runner.status.read().await;
@@ -538,7 +553,7 @@ async fn profile_categories(
     State(st): State<AppState>,
     Path(id): Path<i32>,
     Query(params): Query<HashMap<String, String>>,
-) -> Json<serde_json::Value> {
+) -> impl IntoResponse {
     let media_type = params.get("type").map(|s| s.as_str()).unwrap_or("vod");
     let runners = st.runners.read().await;
     if let Some(runner) = runners.iter().find(|r| r.config.id == id) {
@@ -564,7 +579,7 @@ async fn profile_channels(
     State(st): State<AppState>,
     Path(id): Path<i32>,
     Query(params): Query<HashMap<String, String>>,
-) -> Json<serde_json::Value> {
+) -> impl IntoResponse {
     let runners = st.runners.read().await;
     if let Some(runner) = runners.iter().find(|r| r.config.id == id) {
         let channel_type = params.get("type").map(|s| s.as_str()).unwrap_or("itv");
@@ -581,7 +596,7 @@ async fn profile_channels(
 
 async fn get_filters(
     State(st): State<AppState>,
-) -> Json<serde_json::Value> {
+) -> impl IntoResponse {
     let filters = st.filters.read().await;
     Json(serde_json::to_value(&*filters).unwrap_or_default())
 }
@@ -633,7 +648,7 @@ async fn set_filters(
 async fn reset_filters(
     State(st): State<AppState>,
     Path(id): Path<i32>,
-) -> Json<serde_json::Value> {
+) -> impl IntoResponse {
     let mut filters = st.filters.write().await;
     filters.reset_profile(id);
     save_filters(&filters, &st.data_dir);
@@ -657,7 +672,7 @@ async fn get_runtime_settings() -> Json<RuntimeSettings> {
 
 async fn set_runtime_settings(
     Json(settings): Json<RuntimeSettings>,
-) -> Json<serde_json::Value> {
+) -> impl IntoResponse {
     tracing::info!("Runtime settings updated: {:?}", settings);
     Json(serde_json::json!({"ok": true, "settings": settings}))
 }
@@ -679,7 +694,7 @@ pub struct SyncFilterState {
 async fn sync_filters(
     State(st): State<AppState>,
     Json(snapshot): Json<HashMap<i32, SyncFilterState>>,
-) -> Json<serde_json::Value> {
+) -> impl IntoResponse {
     let count = snapshot.len();
     {
         let mut filters = st.filters.write().await;
@@ -729,21 +744,23 @@ pub fn load_favourites(data_dir: &std::path::Path) -> FavouriteStore {
 
 // ─── New routes added to build_router ─────────────────────────────────────────
 
-pub fn build_router_v2(state: AppState, favs: std::sync::Arc<tokio::sync::RwLock<FavouriteStore>>) -> axum::Router {
-    use axum::routing::{get, post};
-    build_router(state.clone())
+pub fn build_router_v2(state: AppState, favs: std::sync::Arc<tokio::sync::RwLock<FavouriteStore>>) -> Router {
+    use axum::routing::get;
+    build_router()
         .route("/api/v1/profile/:id/epg", get(epg_handler))
         .route("/api/v1/profile/:id/favourites", get(list_favourites).post(toggle_favourite))
         .route("/api/v1/search", get(search_channels))
         .route("/api/v1/health/detail", get(health_detail))
+        .with_state(state)
         .layer(axum::Extension(favs))
+        .layer(tower_http::trace::TraceLayer::new_for_http())
 }
 
 async fn epg_handler(
     State(st): State<AppState>,
     Path(id): Path<i32>,
     Query(params): Query<HashMap<String, String>>,
-) -> Json<serde_json::Value> {
+) -> impl IntoResponse {
     let cmd = params.get("cmd").cloned().unwrap_or_default();
     if cmd.is_empty() {
         return Json(serde_json::json!({"entries": [], "error": "cmd required"}));
@@ -769,13 +786,12 @@ async fn epg_handler(
         Err(e) => Json(serde_json::json!({"entries": [], "error": e.to_string()})),
     }
 }
-}
 
 async fn list_favourites(
     State(st): State<AppState>,
     Path(id): Path<i32>,
     axum::Extension(favs): axum::Extension<std::sync::Arc<tokio::sync::RwLock<FavouriteStore>>>,
-) -> Json<serde_json::Value> {
+) -> impl IntoResponse {
     // Read fav CMDs then immediately release the lock before touching runners
     let fav_cmds: Vec<String> = favs.read().await.get(id);
     if fav_cmds.is_empty() {
@@ -799,14 +815,13 @@ async fn list_favourites(
         .collect();
     Json(serde_json::json!({"favourites": fav_channels}))
 }
-}
 
 async fn toggle_favourite(
     State(st): State<AppState>,
     Path(id): Path<i32>,
     axum::Extension(favs): axum::Extension<std::sync::Arc<tokio::sync::RwLock<FavouriteStore>>>,
     Json(body): Json<HashMap<String, String>>,
-) -> Json<serde_json::Value> {
+) -> impl IntoResponse {
     let cmd = body.get("cmd").cloned().unwrap_or_default();
     if cmd.is_empty() { return Json(serde_json::json!({"ok": false, "error": "cmd required"})); }
     let mut fav_store = favs.write().await;
@@ -818,7 +833,7 @@ async fn toggle_favourite(
 async fn search_channels(
     State(st): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
-) -> Json<serde_json::Value> {
+) -> impl IntoResponse {
     let query = params.get("q").map(|s| s.to_lowercase()).unwrap_or_default();
     let profile_id = params.get("profile_id").and_then(|s| s.parse::<i32>().ok());
     if query.len() < 2 { return Json(serde_json::json!({"results": []})); }
@@ -847,7 +862,7 @@ async fn search_channels(
     Json(serde_json::json!({"results": results, "count": results.len()}))
 }
 
-async fn health_detail(State(st): State<AppState>) -> Json<serde_json::Value> {
+async fn health_detail(State(st): State<AppState>) -> impl IntoResponse {
     let runners = st.runners.read().await;
     let profiles = st.profiles.read().await;
     let profile_health: Vec<serde_json::Value> = profiles.iter().map(|p| {
