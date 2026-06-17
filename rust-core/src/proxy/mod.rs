@@ -343,7 +343,7 @@ async fn proxy_handler(
     if let Some(ref v) = query.action  { query_params.push(("action".to_string(), v.clone())); }
     if let Some(ref v) = query.cmd     { query_params.push(("cmd".to_string(),    v.clone())); }
 
-    // Device identity rewriting
+    // Device identity rewriting — replace STB params with engine's identity
     if query.sn.is_some() {
         query_params.push(("sn".to_string(), st.serial_number.clone()));
     }
@@ -360,10 +360,34 @@ async fn proxy_handler(
     // Metrics MAC/serial rewriting
     let metrics_rewritten = crate::mag::scrub_metrics(&mut query_params, &st.serial_number, &st.mac);
 
-    // Append remaining extra params (excluding ones already handled)
+    // Append remaining extra params, scrubbing STB-generated junk values
     let handled = ["type", "action", "cmd", "sn", "device_id", "device_id2", "signature", "metrics"];
+    // Parameters that the engine provides correct values for (override STB's undefined/null/empty)
+    let engine_overrides: &[(&str, &str)] = &[
+        ("stb_type", &st.model),
+        ("client_type", "STB"),
+        ("ver", "ImageDescription: 2.20.02-pub-424; ImageDate: Fri May 8 15:39:55 UTC 2020; PORTAL version: 5.3.0; API Version: JS API version: 343; STB API version: 146; Player Engine version: 0x588"),
+        ("image_version", "220"),
+        ("video_out", "hdmi"),
+        ("num_banks", "2"),
+        ("hw_version", "1.7-BD-00"),
+        ("hw_version_2", "1e94aad3c53eeff22eabe78107f368cb9b468fcb"),
+        ("api_signature", "262"),
+        ("auth_second_step", "1"),
+        ("not_valid_token", "0"),
+        ("hd", "1"),
+    ];
     for (k, v) in &query.extra {
-        if !handled.contains(&k.as_str()) && !(k == "metrics" && metrics_rewritten) {
+        if handled.contains(&k.as_str()) || (k == "metrics" && metrics_rewritten) {
+            continue;
+        }
+        // Use engine's identity instead of STB's junk (undefined, null, empty)
+        if let Some(replacement) = engine_overrides.iter().find(|(ek, _)| ek == k) {
+            query_params.push((k.clone(), replacement.1.to_string()));
+        } else if v == "undefined" || v == "null" {
+            // Skip STB-generated undefined/null values — they break portal validation
+            continue;
+        } else {
             query_params.push((k.clone(), v.clone()));
         }
     }

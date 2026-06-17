@@ -249,7 +249,6 @@ impl PortalClient {
         builder
             .timeout(std::time::Duration::from_secs(60))
             .use_rustls_tls()
-            .min_tls_version(reqwest::tls::Version::TLS_1_2)
             .tcp_keepalive(std::time::Duration::from_secs(60))
             // HTTP/2 SETTINGS fingerprint matching (MAG254 WebKit defaults)
             .http2_initial_stream_window_size(65535)
@@ -259,9 +258,6 @@ impl PortalClient {
             .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
             // TCP stack fingerprinting
             .tcp_nodelay(true)           // MAG254 disables Nagle's algorithm
-            .pool_max_idle_per_host(1)   // force single-connection: create_link +
-                                         // stream must share same TCP/TLS session
-            .pool_idle_timeout(std::time::Duration::from_secs(30))
             .https_only(false)
             .local_address(Some(std::net::Ipv4Addr::UNSPECIFIED.into()))
     }
@@ -288,7 +284,7 @@ impl PortalClient {
             _ if 0 == 0 => "B", // Base branch
             _ => "X",
         };
-        
+
         if !serial_number.is_empty() {
             serial_number = format!("{}{}", serial_number, branch);
         }
@@ -321,34 +317,93 @@ impl PortalClient {
         }
     }
 
-    /// Rebuild the internal client with European DNS resolution for the portal hostname.
-    /// Call this after construction to bypass geo-blocking on portal requests.
+    /// Try to build a client pinned to a specific port and verify it can reach the portal.
+    async fn try_port(host: &str, port: u16, ips: &[std::net::IpAddr], ua: &str, timeout_secs: u64) -> Option<reqwest::Client> {
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .user_agent(ua)
+            .danger_accept_invalid_certs(false);
+        builder = Self::configure_stealth_client(builder);
+        if !ips.is_empty() {
+            builder = builder.resolve(host, SocketAddr::new(ips[0], port));
+        }
+        let client = builder.build().ok()?;
+        let probe_url = format!("https://{}:{}/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml", host, port);
+        if client.post(&probe_url)
+            .form(&[("mac", "00:1A:79:00:00:00"), ("sn", "0000000000000"), ("stb_type", "MAG254")])
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .send().await.is_ok() {
+            tracing::info!("[STALKER] portal reachable on port {}", port);
+            Some(client)
+        } else {
+            None
+        }
+    }
+
+    /// Rebuild the internal client with European DNS resolution.
+    /// Probes ports to find the working HTTPS endpoint — some portals use
+    /// non-standard ports or have port 80 in the URL but serve API on 443.
     pub async fn resolve_eu_dns(&mut self) {
         let parsed = match url::Url::parse(&self.base_url) {
             Ok(u) => u,
             Err(_) => return,
         };
         let host = parsed.host_str().unwrap_or("").to_string();
-        let port = parsed.port_or_known_default().unwrap_or(443);
         let ips = dns::resolve_european(&host).await;
 
         let fp = model_fingerprint(&self.model);
-        let ua = format!(
+        let ua_str = format!(
             "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/{} (KHTML, like Gecko) {} stbapp ver: {} rev: 2034 Mobile Safari/{}",
             fp.webkit_ver, self.model, fp.stbapp_major, fp.safari_ver
         );
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .user_agent(ua)
-            .danger_accept_invalid_certs(false);
 
-        builder = Self::configure_stealth_client(builder);
-
-        if !ips.is_empty() {
-            builder = builder.resolve(&host, SocketAddr::new(ips[0], port));
+        // Probe candidate ports in order. First to respond wins.
+        // Covers common Stalker/Ministry portal ports plus custom configurations.
+        let explicit_port = parsed.port();
+        let mut candidates = vec![443u16];
+        if let Some(p) = explicit_port {
+            if p != 443 { candidates.push(p); }
         }
-        if let Ok(client) = builder.build() {
+        // Common Stalker/nginx/Apache HTTPS and HTTP-alt ports
+        for &p in &[8443u16, 8080, 25461, 88, 8880, 8000, 8181, 2083, 2087, 2096] {
+            if !candidates.contains(&p) { candidates.push(p); }
+        }
+
+        let mut best_client = None;
+        // Fast probe (2s) for most likely ports first, then wider scan (1s) for the rest
+        let priority_ports: Vec<u16> = candidates.iter().take(3).copied().collect();
+        let rest_ports: Vec<u16> = candidates.iter().skip(3).copied().collect();
+
+        for &port in &priority_ports {
+            if let Some(c) = Self::try_port(&host, port, &ips, &ua_str, 2).await {
+                best_client = Some(c);
+                break;
+            }
+        }
+        if best_client.is_none() {
+            // Sequential quick probe for remaining ports (1s each)
+            for &port in &rest_ports {
+                if let Some(c) = Self::try_port(&host, port, &ips, &ua_str, 1).await {
+                    best_client = Some(c);
+                    break;
+                }
+            }
+        } else {
+            // priority port found — already logged in try_port
+        }
+        if let Some(client) = best_client {
             self.client = client;
+        } else if !ips.is_empty() {
+            // Fallback: build with port 443 even if probe failed
+            let mut builder = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .user_agent(&ua_str)
+                .danger_accept_invalid_certs(false);
+            builder = Self::configure_stealth_client(builder);
+            builder = builder.resolve(&host, SocketAddr::new(ips[0], 443));
+            if let Ok(client) = builder.build() {
+                self.client = client;
+            }
         }
     }
 
@@ -709,32 +764,19 @@ impl PortalClient {
         Ok(())
     }
 
-    /// Fetch a stream using the internal HTTP client (same TLS session as API calls).
+    /// Fetch a stream URL via create_link and return the response.
+    /// NOTE: The portal's stream server at /play/live.php geo-blocks non-European IPs.
+    /// Only direct CDN channels (not routed through the portal's play/live.php) will work.
     pub async fn fetch_stream(&self, cmd: &str) -> Result<(Vec<u8>, reqwest::header::HeaderMap), Box<dyn std::error::Error + Send + Sync>> {
-        let host_str = url::Url::parse(&self.base_url).ok()
+        let url = self.create_link(cmd).await?;
+        let https_url = url.replacen("http://", "https://", 1).replace(":80/", "/");
+        let host_str = url::Url::parse(&https_url).ok()
             .and_then(|u| u.host_str().map(|s| s.to_string()))
             .unwrap_or_default();
         let (_, tz) = crate::dns::get_sticky_european_identity(&host_str);
-        let stream_id = crate::proxy::extract_stream_id(cmd);
-        let stream_url = format!(
-            "https://{}/play/live.php?mac={}&stream={}&extension=ts&play_token=warm",
-            host_str, &self.mac, stream_id
-        );
-        let ua = format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 250 Mobile Safari/533.3", self.model);
-        let cookie = format!("PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};", &self.serial_number, &self.mac, tz);
-
-        // Do a quick handshake first on the SAME client to warm the connection
-        let warmup_url = format!("https://{}/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml", host_str);
-        let _ = self.client.post(&warmup_url)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .header("User-Agent", &ua)
-            .form(&[("mac", &self.mac), ("sn", &self.serial_number), ("stb_type", &self.model)])
-            .send().await;
-
-        // Now fetch the stream — connection pool should reuse the warm connection
-        let resp = self.client.get(&stream_url)
-            .header("User-Agent", &ua)
-            .header("Cookie", &cookie)
+        let resp = self.client.get(&https_url)
+            .header("User-Agent", format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 250 Mobile Safari/533.3", self.model))
+            .header("Cookie", format!("PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};", &self.serial_number, &self.mac, tz))
             .header("Accept", "*/*")
             .send().await?;
         let status = resp.status();
