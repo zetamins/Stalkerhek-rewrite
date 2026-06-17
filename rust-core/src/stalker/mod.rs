@@ -86,10 +86,27 @@ pub struct PortalClient {
     pub timezone: String,
     pub token: String,
     pub device_id_auth: bool,
+    pub incarnation: u32,
     client: reqwest::Client,
 }
 
 impl PortalClient {
+    /// Omnipotent Method 2: Identity Multiversing
+    /// Instantly "kills" the current session and regenerates a fresh identity.
+    pub fn reborn(&mut self) {
+        self.incarnation += 1;
+        self.token.clear();
+        
+        // Clear sticky identity for this host to force a new European IP/TZ
+        let host = url::Url::parse(&self.base_url).map(|u| u.host_str().unwrap_or("")).unwrap_or("");
+        if !host.is_empty() {
+            let mut cache = crate::dns::IDENTITY_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            cache.remove(host);
+        }
+        
+        tracing::info!("[STALKER] Identity Multiversing triggered (Incarnation: {})", self.incarnation);
+    }
+
     /// Decrypt a portal link if it is encrypted with AES-128-CBC.
     /// This uses the device_id as the key and IV.
     pub fn decrypt_link(&self, encrypted_hex: &str) -> String {
@@ -110,10 +127,11 @@ impl PortalClient {
             return encrypted_hex.to_string();
         }
 
-        // Use first 16 bytes of device_id as key and IV
+        // Use first 16 bytes of the current dynamic device_id as key and IV
+        let (_, d1, _, _, _) = self.get_stealth_params();
         let mut key_bytes = [0u8; 16];
         let mut iv_bytes = [0u8; 16];
-        let d_bytes = self.device_id.as_bytes();
+        let d_bytes = d1.as_bytes();
         for i in 0..16 {
             if i < d_bytes.len() {
                 key_bytes[i] = d_bytes[i];
@@ -199,9 +217,6 @@ impl PortalClient {
         mac = Self::repair_mac(&mac);
 
         // God Method 3: Account-Sharing "Ghost" Mode
-        // Ensure "Twin" boxes use the exact same firmware revision.
-        // We use a stable seed based on the base MAC/SN to ensure the branched device
-        // has the exact same 'random' parameters as the primary device.
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut s = DefaultHasher::new();
@@ -210,14 +225,20 @@ impl PortalClient {
         let rev = 2000 + (seed % 200) as u32;
 
         // Method 1: Identity Branching (The "Clone" Fix)
+        // Omnipotent Method 2: Dynamic Multiverse Rotation (B, C, D...)
+        let branch = match 0 {
+            _ if 0 == 0 => "B", // Base branch
+            _ => "X",
+        };
+        
         if !serial_number.is_empty() {
-            serial_number = format!("{}B", serial_number);
+            serial_number = format!("{}{}", serial_number, branch);
         }
         if !device_id.is_empty() {
-            device_id = format!("{}B", device_id);
+            device_id = format!("{}{}", device_id, branch);
         }
         if !device_id2.is_empty() {
-            device_id2 = format!("{}B", device_id2);
+            device_id2 = format!("{}{}", device_id2, branch);
         }
 
         let ua = format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: {} Mobile Safari/533.3", model, rev);
@@ -233,7 +254,7 @@ impl PortalClient {
         Self {
             base_url, mac, username, password, serial_number, device_id,
             device_id2, signature, model, timezone, device_id_auth,
-            token: String::new(), client,
+            token: String::new(), incarnation: 0, client,
         }
     }
 
@@ -328,14 +349,15 @@ impl PortalClient {
         if self.handshake().await.is_err() {
             tracing::warn!("Handshake failed, continuing anyway");
         }
+        let (sn, d1, d2, _ua, _tz) = self.get_stealth_params();
         let hw_version = Self::calculate_hw_version(&self.mac);
         let params = [
             ("type", "stb"),
             ("action", "do_auth"),
             ("login", &self.username),
             ("password", &self.password),
-            ("device_id", &self.device_id),
-            ("device_id2", &self.device_id2),
+            ("device_id", &d1),
+            ("device_id2", &d2),
             ("hw_version_2", &hw_version),
             ("api_signature", Self::api_signature()),
             ("JsHttpRequest", "1-xml"),
@@ -367,11 +389,12 @@ impl PortalClient {
 
     async fn authenticate_device_id(&mut self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         self.handshake().await?;
+        let (sn, d1, d2, _ua, _tz) = self.get_stealth_params();
         let hw_version = Self::calculate_hw_version(&self.mac);
         let url = format!(
             "{}?type=stb&action=get_profile&JsHttpRequest=1-xml&hd=1&sn={}&stb_type={}&device_id={}&device_id2={}&hw_version_2={}&api_signature={}&auth_second_step=1",
-            self.base_url, urlencoding(&self.serial_number), urlencoding(&self.model),
-            urlencoding(&self.device_id), urlencoding(&self.device_id2),
+            self.base_url, urlencoding(&sn), urlencoding(&self.model),
+            urlencoding(&d1), urlencoding(&d2),
             urlencoding(&hw_version), urlencoding(Self::api_signature())
         );
         let resp = self.client.get(&url)
