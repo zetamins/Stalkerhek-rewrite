@@ -57,7 +57,7 @@ pub fn build_router(
 
     let stream_client = {
         let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
+            .timeout(std::time::Duration::from_secs(60))
             .redirect(reqwest::redirect::Policy::none());
         
         builder = stalker::PortalClient::configure_stealth_client(builder);
@@ -290,7 +290,8 @@ async fn epg_handler(
     let eur_ips = dns::resolve_european(&host).await;
 
     let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(300))
+        .timeout(Duration::from_secs(60))
+
         .redirect(reqwest::redirect::Policy::none());
     
     builder = stalker::PortalClient::configure_stealth_client(builder);
@@ -437,7 +438,7 @@ async fn proxy_request(
         let client_ref: &reqwest::Client;
         if !eur_ips.is_empty() {
             let mut builder = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(300))
+                .timeout(std::time::Duration::from_secs(60))
                 .redirect(reqwest::redirect::Policy::none())
                 .resolve(&current_host, SocketAddr::new(eur_ips[0], current_port));
             

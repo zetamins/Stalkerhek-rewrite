@@ -137,6 +137,7 @@ impl PortalClient {
         // Ultimate Method 2: Enable TLS ECH and randomized extensions
         // Absolute Max: ALPN spoofing (h2, http/1.1) and SNI evasion
         builder
+            .timeout(std::time::Duration::from_secs(60))
             .use_rustls_tls() 
             .min_tls_version(reqwest::tls::Version::TLS_1_0)
             .max_tls_version(reqwest::tls::Version::TLS_1_2) 
@@ -155,7 +156,7 @@ impl PortalClient {
         mac = Self::repair_mac(&mac);
         let ua = format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 2034 Mobile Safari/533.3", model);
         let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(60))
             .user_agent(ua)
             .danger_accept_invalid_certs(false);
         
@@ -183,7 +184,7 @@ impl PortalClient {
 
         let ua = format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 2034 Mobile Safari/533.3", self.model);
         let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(60))
             .user_agent(ua)
             .danger_accept_invalid_certs(false);
             

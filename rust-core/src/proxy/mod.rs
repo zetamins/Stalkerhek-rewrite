@@ -82,7 +82,7 @@ pub fn build_router(
 
     let portal_http_client = {
         let mut builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(300))
+            .timeout(Duration::from_secs(60))
             .redirect(reqwest::redirect::Policy::none());
         
         // Apply stealth TLS and socket settings (Methods 1 & 5)
@@ -414,7 +414,7 @@ async fn proxy_handler(
         let client: &reqwest::Client;
         if !eur_ips.is_empty() {
             let mut builder = reqwest::Client::builder()
-                .timeout(Duration::from_secs(300))
+                .timeout(Duration::from_secs(60))
                 .redirect(reqwest::redirect::Policy::none())
                 .resolve(&current_host, SocketAddr::new(eur_ips[0], current_port));
             
