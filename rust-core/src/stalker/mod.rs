@@ -198,10 +198,16 @@ impl PortalClient {
     ) -> Self {
         mac = Self::repair_mac(&mac);
 
-        // Infinity Method 3: Firmware Entropy
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let rev = rng.gen_range(2000..2200);
+        // God Method 3: Account-Sharing "Ghost" Mode
+        // Ensure "Twin" boxes use the exact same firmware revision.
+        // We use a stable seed based on the base MAC/SN to ensure the branched device
+        // has the exact same 'random' parameters as the primary device.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut s = DefaultHasher::new();
+        serial_number.hash(&mut s);
+        let seed = s.finish();
+        let rev = 2000 + (seed % 200) as u32;
 
         // Method 1: Identity Branching (The "Clone" Fix)
         if !serial_number.is_empty() {
