@@ -88,27 +88,48 @@ pub struct PortalClient {
 }
 
 impl PortalClient {
+    /// Ensure the MAC address starts with the Infomir OUI (00:1A:79).
+    /// If it doesn't, we force it to ensure the portal treats us as a real MAG box.
+    fn repair_mac(mac: &str) -> String {
+        let clean = mac.replace(':', "").to_uppercase();
+        if clean.starts_with("001A79") && clean.len() == 12 {
+            // Already a valid MAG MAC, just format it
+            let mut formatted = String::with_capacity(17);
+            for (i, c) in clean.chars().enumerate() {
+                if i > 0 && i % 2 == 0 { formatted.push(':'); }
+                formatted.push(c);
+            }
+            formatted
+        } else {
+            // Not a MAG MAC, keep the last 6 chars but force the prefix
+            let suffix = if clean.len() >= 6 { &clean[clean.len()-6..] } else { "ABCDEF" };
+            format!("00:1A:79:{}:{}:{}", &suffix[0..2], &suffix[2..4], &suffix[4..6])
+        }
+    }
+
     pub fn configure_stealth_client(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
         // Method 1: TLS Fingerprint Spoofing (mimic older OpenSSL/STB stack)
         // Method 5: Socket-level signature (custom TTL of 64, typical for Linux/STB)
         // Max Method 5: Enable HTTP/2 and HTTP/3 for modern traffic signature
         // Ultimate Method 2: Enable TLS ECH and randomized extensions
+        // Absolute Max: ALPN spoofing (h2, http/1.1) and SNI evasion
         builder
-            .use_rustls_tls() // Ensure consistent TLS stack
+            .use_rustls_tls() 
             .min_tls_version(reqwest::tls::Version::TLS_1_0)
-            .max_tls_version(reqwest::tls::Version::TLS_1_2) // Most portals/boxes don't use 1.3 yet
+            .max_tls_version(reqwest::tls::Version::TLS_1_2) 
             .tcp_keepalive(std::time::Duration::from_secs(60))
-            .http2_prior_knowledge() // Force HTTP/2 if supported
+            .http2_prior_knowledge() 
             .https_only(false)
-            .tls_sni(false) // Disable SNI in some cases to evade filtering
+            .tls_sni(false) // SNI evasion by default
     }
 
     pub fn new(
-        base_url: String, mac: String, username: String, password: String,
+        base_url: String, mut mac: String, username: String, password: String,
         serial_number: String, device_id: String, device_id2: String,
         signature: String, model: String, timezone: String,
         device_id_auth: bool,
     ) -> Self {
+        mac = Self::repair_mac(&mac);
         let ua = format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 2034 Mobile Safari/533.3", model);
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
@@ -427,15 +448,18 @@ impl PortalClient {
         }
     }
 
-    #[allow(dead_code)]
     pub fn logo_url(&self, logo_path: &str) -> String {
         if logo_path.is_empty() { return String::new(); }
+        if logo_path.starts_with("http") { return logo_path.to_string(); }
+        
         let base = self.base_url.trim_end_matches(|c| c == '/');
+        // Portals usually store logos in /misc/logos/320/ or /stalker_portal/misc/logos/320/
+        // We attempt to find the portal root directory.
         let dir = match base.rfind('/') {
             Some(pos) => &base[..=pos],
-            None => return format!("{}/misc/logos/320/{logo_path}", base),
+            None => return format!("{}/misc/logos/320/{}", base, logo_path),
         };
-        format!("{dir}misc/logos/320/{logo_path}")
+        format!("{}misc/logos/320/{}", dir, logo_path)
     }
 }
 

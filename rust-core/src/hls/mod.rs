@@ -81,8 +81,75 @@ pub fn build_router(
     Router::new()
         .route("/", get(playlist_handler))
         .route("/epg", get(epg_handler))
+        .route("/logo/*path", get(logo_handler))
         .route("/*path", get(channel_handler))
         .with_state(state)
+}
+
+async fn logo_handler(
+    State(st): State<HlsState>,
+    Path(path): Path<String>,
+) -> Response {
+    let logo_path = url_decode(&path);
+    let target_url = {
+        let client = st.portal_client.read().await;
+        client.logo_url(&logo_path)
+    };
+    if target_url.is_empty() { return StatusCode::NOT_FOUND.into_response(); }
+
+    tracing::info!("[HLS] logo request: {}", &target_url);
+
+    let parsed = match url::Url::parse(&target_url) {
+        Ok(u) => u,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    let host = parsed.host_str().unwrap_or("").to_string();
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let eur_ips = dns::resolve_european(&host).await;
+
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none());
+    
+    builder = stalker::PortalClient::configure_stealth_client(builder);
+    
+    if !eur_ips.is_empty() {
+        builder = builder.resolve(&host, SocketAddr::new(eur_ips[0], port));
+    }
+    let client = match builder.build() {
+        Ok(c) => c,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+
+    let mut req = client.get(&target_url);
+    let token = st.token.read().await.clone();
+    req = crate::mag::apply_mag_headers(
+        req, &token, &st.serial_number, &st.mac, &st.timezone, &st.model,
+    );
+
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let bytes = resp.bytes().await.unwrap_or_default();
+            let mut response = Response::builder().status(status);
+            for (key, val) in headers.iter() {
+                let ks = key.as_str().to_lowercase();
+                match ks.as_str() {
+                    "host" | "connection" | "transfer-encoding" | "keep-alive"
+                    | "te" | "trailer" | "upgrade" | "content-length"
+                    | "content-encoding" => continue,
+                    _ => { response = response.header(key, val); }
+                }
+            }
+            response
+                .header("Access-Control-Allow-Origin", "*")
+                .header("Cache-Control", "public, max-age=86400")
+                .body(Body::from(bytes.to_vec()))
+                .unwrap()
+        }
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
 }
 
 async fn playlist_handler(

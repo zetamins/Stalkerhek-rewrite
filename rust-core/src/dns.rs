@@ -63,11 +63,18 @@ pub async fn resolve_european(hostname: &str) -> Vec<IpAddr> {
     }
 
     // Dynamic ECS Rotation: Pick a random European residential subnet
-    // Blocks: 85.214.0.0/16 (DE), 92.184.0.0/16 (FR), 81.130.0.0/16 (UK), 87.213.0.0/16 (IT)
-    let blocks = ["85.214", "92.184", "81.130", "87.213"];
+    let data = [
+        ("85.214", "Europe/Berlin"),   // Germany (Strato)
+        ("92.184", "Europe/Paris"),    // France (Orange)
+        ("81.130", "Europe/London"),   // UK (BT)
+        ("87.213", "Europe/Rome"),     // Italy (Telecom Italia)
+        ("213.205", "Europe/London"),  // UK (O2)
+        ("80.28", "Europe/Madrid"),    // Spain (Telefonica)
+        ("82.161", "Europe/Amsterdam"),// Netherlands (KPN)
+    ];
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    let block = blocks[rng.gen_range(0..blocks.len())];
+    let (block, _tz) = data[rng.gen_range(0..data.len())];
     let ecs = format!("{}.{}.{}", block, rng.gen_range(1..254), rng.gen_range(1..254));
 
     let url = format!(
