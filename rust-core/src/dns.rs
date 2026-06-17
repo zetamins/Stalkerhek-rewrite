@@ -13,6 +13,37 @@ struct TzEntry {
     expires: Instant,
 }
 
+struct IdentityEntry {
+    ip: String,
+    tz: String,
+    expires: Instant,
+}
+
+static IDENTITY_CACHE: std::sync::LazyLock<Mutex<HashMap<String, IdentityEntry>>> = std::sync::LazyLock::new(|| {
+    Mutex::new(HashMap::new())
+});
+
+/// Generate or retrieve a "Sticky" European identity for a host.
+/// Methods 1 (Stickiness): Locks the identity for 4 hours.
+pub fn get_sticky_european_identity(hostname: &str) -> (String, String) {
+    {
+        let mut cache = IDENTITY_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = cache.get(hostname) {
+            if entry.expires > Instant::now() {
+                return (entry.ip.clone(), entry.tz.clone());
+            }
+        }
+        
+        let (ip, tz) = get_random_european_identity();
+        cache.insert(hostname.to_string(), IdentityEntry {
+            ip: ip.clone(),
+            tz: tz.clone(),
+            expires: Instant::now() + Duration::from_secs(14400), // 4 Hours
+        });
+        (ip, tz)
+    }
+}
+
 /// Generate a random European IP and its matching timezone from major residential blocks.
 pub fn get_random_european_identity() -> (String, String) {
     let data = [

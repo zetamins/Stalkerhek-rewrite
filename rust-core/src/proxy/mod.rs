@@ -441,7 +441,7 @@ async fn proxy_handler(
 
         // Apply MAG headers
         proxy_req = crate::mag::apply_mag_headers(
-            proxy_req, &current_token, &st.serial_number, &st.mac, &st.timezone, &st.model,
+            proxy_req, &current_token, &st.serial_number, &st.mac, &st.timezone, &st.model, &current_host
         );
         let referer_host = match current_url.splitn(2, "://").nth(1).and_then(|r| r.split('/').next()) {
             Some(h) => format!("{}://{}/", if current_url.starts_with("https") { "https" } else { "http" }, h),
@@ -635,6 +635,7 @@ async fn proxy_refresh_and_retry(
     }
     proxy_req = crate::mag::apply_mag_headers(
         proxy_req, &fresh_token, &st.serial_number, &st.mac, &st.timezone, &st.model,
+        url::Url::parse(&fresh_url).map(|u| u.host_str().unwrap_or("")).unwrap_or("")
     );
     let referer_host = st.portal_base.trim_end_matches('/');
     proxy_req = proxy_req.header("Referer", format!("{}/", referer_host))

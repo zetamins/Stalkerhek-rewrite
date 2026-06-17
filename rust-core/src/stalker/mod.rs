@@ -21,12 +21,14 @@ impl WatchdogClient {
             "{}?action=get_events&event_active_id=0&init=0&type=watchdog&cur_play_type=1&JsHttpRequest=1-xml",
             self.base_url
         );
+        let host = url::Url::parse(&self.base_url).map(|u| u.host_str().unwrap_or("")).unwrap_or("");
+        let (eur_ip, eur_tz) = dns::get_sticky_european_identity(host);
+        
         use reqwest::header::*;
         let mut h = HeaderMap::new();
         h.insert(ACCEPT, HeaderValue::from_static("*/*"));
         h.insert("Cache-Control", HeaderValue::from_static("no-cache"));
         h.insert("X-User-Agent", HeaderValue::from_str(&format!("Model: {}; Link: Ethernet", self.model)).unwrap());
-        let eur_ip = dns::get_random_european_ip();
         h.insert("X-Forwarded-For", HeaderValue::from_str(&eur_ip).unwrap());
         h.insert("X-Real-IP", HeaderValue::from_str(&eur_ip).unwrap());
         h.insert("CF-Connecting-IP", HeaderValue::from_str(&eur_ip).unwrap());
@@ -37,7 +39,7 @@ impl WatchdogClient {
         }
         let cookie = format!(
             "PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};",
-            urlencoding(&self.serial_number), urlencoding(&self.mac), urlencoding(&self.timezone),
+            urlencoding(&self.serial_number), urlencoding(&self.mac), urlencoding(&eur_tz),
         );
         h.insert(COOKIE, HeaderValue::from_str(&cookie).unwrap());
         let resp = self.client.get(&url).headers(h).send().await?;
@@ -207,7 +209,10 @@ impl PortalClient {
         h.insert("Cache-Control", HeaderValue::from_static("no-cache"));
         h.insert("Pragma", HeaderValue::from_static("no-cache"));
         h.insert("X-User-Agent", HeaderValue::from_str(&format!("Model: {}; Link: Ethernet", self.model)).unwrap());
-        let eur_ip = dns::get_random_european_ip();
+        
+        let host = url::Url::parse(&self.base_url).map(|u| u.host_str().unwrap_or("")).unwrap_or("");
+        let (eur_ip, eur_tz) = dns::get_sticky_european_identity(host);
+        
         h.insert("X-Forwarded-For", HeaderValue::from_str(&eur_ip).unwrap());
         h.insert("X-Real-IP", HeaderValue::from_str(&eur_ip).unwrap());
         h.insert("CF-Connecting-IP", HeaderValue::from_str(&eur_ip).unwrap());
@@ -220,7 +225,7 @@ impl PortalClient {
             "PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};",
             urlencoding(&self.serial_number),
             urlencoding(&self.mac),
-            urlencoding(&self.timezone),
+            urlencoding(&eur_tz),
         );
         h.insert(COOKIE, HeaderValue::from_str(&cookie).unwrap());
         h

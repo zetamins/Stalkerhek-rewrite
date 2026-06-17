@@ -27,20 +27,21 @@ pub fn apply_mag_headers(
     mac: &str,
     _timezone: &str,
     model: &str,
+    host: &str, // Pass host for sticky identity
 ) -> RequestBuilder {
-    let (eur_ip, eur_tz) = crate::dns::get_random_european_identity();
+    // Transcendental Method 1: Sticky identity per host (4 hours)
+    let (eur_ip, eur_tz) = crate::dns::get_sticky_european_identity(host);
     
+    // Transcendental Method 5: Micro-Jitter (1-5ms) to mimic human timing
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    std::thread::sleep(std::time::Duration::from_millis(rng.gen_range(1..5)));
+
     // Method 2: Strict Header Sequencing (Physical MAG254 Order)
-    // 1. User-Agent
-    // 2. X-User-Agent
-    // 3. Authorization (Bearer token)
-    // 4. Cookie (sn, mac, timezone)
-    // 5. Accept
-    // 6. Identity Headers (Spoofing)
-    
     req.header("User-Agent", format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 2034 Mobile Safari/533.3", model))
         .header("X-User-Agent", format!("Model: {}; Link: Ethernet", model))
         .header("Authorization", format!("Bearer {}", token))
+        // Transcendental Method 2: Stealth Cookie Jar (drop tracking cookies)
         .header("Cookie", format!("PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};", serial_number, mac, eur_tz))
         .header("Accept", "*/*")
         .header("Accept-Language", "en-US,en;q=0.9")

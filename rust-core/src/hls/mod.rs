@@ -124,7 +124,7 @@ async fn logo_handler(
     let mut req = client.get(&target_url);
     let token = st.token.read().await.clone();
     req = crate::mag::apply_mag_headers(
-        req, &token, &st.serial_number, &st.mac, &st.timezone, &st.model,
+        req, &token, &st.serial_number, &st.mac, &st.timezone, &st.model, &host
     );
 
     match req.send().await {
@@ -307,7 +307,7 @@ async fn epg_handler(
     let mut req = client.get(&epg_url);
     let epg_token = st.token.read().await.clone();
     req = crate::mag::apply_mag_headers(
-        req, &epg_token, &st.serial_number, &st.mac, &st.timezone, &st.model,
+        req, &epg_token, &st.serial_number, &st.mac, &st.timezone, &st.model, &host
     );
 
     // Use the profile's configured timezone for EPG timeshift metadata.
@@ -450,7 +450,7 @@ async fn proxy_request(
         }
 
         let req = client_ref.get(&current_url);
-        let req = crate::mag::apply_mag_headers(req, token, serial_number, mac, timezone, model);
+        req = crate::mag::apply_mag_headers(req, token, serial_number, mac, timezone, model, &current_host);
         tracing::info!("[HLS] fetch (hop {}/{}): {}", hop, max_redirects, current_url);
         let resp = req.send().await?;
         let status = resp.status();
