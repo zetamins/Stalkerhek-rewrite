@@ -88,23 +88,33 @@ pub struct PortalClient {
 }
 
 impl PortalClient {
-    /// Ensure the MAC address starts with the Infomir OUI (00:1A:79).
-    /// If it doesn't, we force it to ensure the portal treats us as a real MAG box.
+    /// Ensure the MAC address is a valid 12-digit hex string with colons.
+    /// If the input is a valid 12-digit hex string, we preserve it.
+    /// If it is shorter, we pad it with the Infomir OUI (00:1A:79).
     fn repair_mac(mac: &str) -> String {
-        let clean = mac.replace(':', "").to_uppercase();
-        if clean.starts_with("001A79") && clean.len() == 12 {
-            // Already a valid MAG MAC, just format it
-            let mut formatted = String::with_capacity(17);
-            for (i, c) in clean.chars().enumerate() {
-                if i > 0 && i % 2 == 0 { formatted.push(':'); }
-                formatted.push(c);
-            }
-            formatted
+        let clean: String = mac.chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .collect::<String>()
+            .to_uppercase();
+
+        let final_mac = if clean.len() == 12 {
+            clean
         } else {
-            // Not a MAG MAC, keep the last 6 chars but force the prefix
-            let suffix = if clean.len() >= 6 { &clean[clean.len()-6..] } else { "ABCDEF" };
-            format!("00:1A:79:{}:{}:{}", &suffix[0..2], &suffix[2..4], &suffix[4..6])
+            // Not a standard length, use MAG prefix and take what we can from the end
+            let suffix = if clean.len() >= 6 { 
+                &clean[clean.len()-6..] 
+            } else { 
+                "ABCDEF" 
+            };
+            format!("001A79{}", suffix)
+        };
+
+        let mut formatted = String::with_capacity(17);
+        for (i, c) in final_mac.chars().enumerate() {
+            if i > 0 && i % 2 == 0 { formatted.push(':'); }
+            formatted.push(c);
         }
+        formatted
     }
 
     pub fn configure_stealth_client(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
