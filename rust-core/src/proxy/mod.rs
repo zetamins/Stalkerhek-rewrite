@@ -146,11 +146,11 @@ async fn proxy_handler(
     query: Query<ProxyQuery>,
     body: axum::body::Bytes,
 ) -> Response {
-    // Skip favicon — not needed by STB
+    // Skip favicon -- not needed by STB
     if uri.path().contains("favicon") {
         return StatusCode::NOT_FOUND.into_response();
     }
-    tracing::info!("[PROXY] {} — action={:?} type={:?} cmd={:?}", uri, query.action, query.r#type, query.cmd);
+    tracing::info!("[PROXY] {} -- action={:?} type={:?} cmd={:?}", uri, query.action, query.r#type, query.cmd);
     if let Some(action) = &query.action {
         match action.as_str() {
             "handshake" => {
@@ -332,18 +332,18 @@ async fn proxy_handler(
         }
     }
 
-    // Build proxy request to real portal — preserve all original params with stable ordering.
+    // Build proxy request to real portal -- preserve all original params with stable ordering.
     // Stalker middleware validates that type comes before action in the query string.
     // Use a Vec to guarantee order: type, action, cmd, then everything else.
     let is_post = method == Method::POST;
     let mut query_params: Vec<(String, String)> = Vec::new();
 
-    // Always put type first, then action, then cmd — Stalker middleware is order-sensitive
+    // Always put type first, then action, then cmd -- Stalker middleware is order-sensitive
     if let Some(ref v) = query.r#type  { query_params.push(("type".to_string(),   v.clone())); }
     if let Some(ref v) = query.action  { query_params.push(("action".to_string(), v.clone())); }
     if let Some(ref v) = query.cmd     { query_params.push(("cmd".to_string(),    v.clone())); }
 
-    // Device identity rewriting — replace STB params with engine's identity
+    // Device identity rewriting -- replace STB params with engine's identity
     if query.sn.is_some() {
         query_params.push(("sn".to_string(), st.serial_number.clone()));
     }
@@ -385,7 +385,7 @@ async fn proxy_handler(
         if let Some(replacement) = engine_overrides.iter().find(|(ek, _)| ek == k) {
             query_params.push((k.clone(), replacement.1.to_string()));
         } else if v == "undefined" || v == "null" {
-            // Skip STB-generated undefined/null values — they break portal validation
+            // Skip STB-generated undefined/null values -- they break portal validation
             continue;
         } else {
             query_params.push((k.clone(), v.clone()));
@@ -408,7 +408,7 @@ async fn proxy_handler(
     };
 
     let final_url = if query_params.is_empty() {
-        // Static asset or root request — proxy to portal_root with the request path
+        // Static asset or root request -- proxy to portal_root with the request path
         let stripped = if request_path.starts_with(&st.portal_root_path) {
             &request_path[st.portal_root_path.len()..]
         } else {
@@ -427,7 +427,7 @@ async fn proxy_handler(
         format!("{}?{}", api_base, qs.join("&"))
     };
 
-    // Manual redirect loop — preserve all headers (Authorization, Cookie) on every hop.
+    // Manual redirect loop -- preserve all headers (Authorization, Cookie) on every hop.
     // DNS is re-resolved on every hop to ensure pinning persists across cross-domain redirects.
     let mut current_url = final_url;
     let max_redirects = 200;
@@ -530,7 +530,7 @@ async fn proxy_handler(
         }
     }
 
-    // Handle 458 (Cloudflare ban) — refresh channels and retry for create_link
+    // Handle 458 (Cloudflare ban) -- refresh channels and retry for create_link
     if is_458 && query.action.as_deref() == Some("create_link") {
         tracing::warn!("[PROXY] got 458 for create_link, refreshing channels...");
         match proxy_refresh_and_retry(&st, &query, &headers, &current_url, &st.portal_http_client).await {
@@ -561,7 +561,7 @@ async fn proxy_handler(
             rewrite_channel_list_response(&body_bytes, body_preview_for, media_type, &filter, st.profile_id, genre)
                 .map(Vec::from)
                 .unwrap_or_else(|| {
-                    tracing::warn!("[PROXY] rewrite_channel_list_response returned None for action={} type={} — using original body", body_preview_for, media_type);
+                    tracing::warn!("[PROXY] rewrite_channel_list_response returned None for action={} type={} -- using original body", body_preview_for, media_type);
                     body_bytes.to_vec()
                 })
         } else {
@@ -614,7 +614,7 @@ pub(crate) fn extract_stream_id(cmd: &str) -> String {
 
 fn generate_create_link_response(stream_url: &str, id: &str, ch_id: &str) -> String {
     let link_id = ch_id.parse::<u64>().unwrap_or(0);
-    // Only escape slashes after the scheme — the STB JS calls JSON.parse() on this
+    // Only escape slashes after the scheme -- the STB JS calls JSON.parse() on this
     // and then does its own URL handling. Escaping "://" breaks protocol parsing.
     let escaped = if let Some(rest) = stream_url.find("://").map(|i| i + 3).and_then(|i| Some((i, stream_url))) {
         let (after_scheme, s) = rest;
@@ -728,7 +728,7 @@ fn json_str<'a>(val: &'a serde_json::Value, buf: &'a mut String) -> &'a str {
 
 /// Intercept channel list responses from the portal and apply filtering/renaming.
 /// Handles `get_all_channels` (ITV) and `get_ordered_list` (ITV/VOD/Series).
-/// get_ordered_list passes through unfiltered — genre-level filtering is enforced
+/// get_ordered_list passes through unfiltered -- genre-level filtering is enforced
 /// by the genre list (hides disabled genres) and create_link (blocks playback).
 fn rewrite_channel_list_response(
     body: &[u8],
@@ -743,7 +743,7 @@ fn rewrite_channel_list_response(
 
     match (action, media_type) {
         ("get_ordered_list", "itv" | "vod" | "series") => {
-            // Don't filter channels from the list — the genre list hides disabled genres
+            // Don't filter channels from the list -- the genre list hides disabled genres
             // so users navigate to specific genres for filtered results, and create_link
             // blocks playback for disabled channels. Just apply renames.
             if let Some(data) = json["js"]["data"].as_array_mut() {

@@ -67,7 +67,7 @@ pub struct Channel {
 
 impl Channel {
     /// Extract the stream URL from the cmd field.
-    /// cmd format is typically "ffmpeg http://..." — this returns just the URL part.
+    /// cmd format is typically "ffmpeg http://..." -- this returns just the URL part.
     pub fn stream_url(&self) -> &str {
         if self.cmd.starts_with("ffmpeg ") {
             &self.cmd[7..]
@@ -123,7 +123,7 @@ pub struct PortalClient {
 
 impl PortalClient {
     /// Get a reference to the internal HTTP client for connection reuse.
-    /// Stream access must use the same client as API calls — Cloudflare binds
+    /// Stream access must use the same client as API calls -- Cloudflare binds
     /// play_tokens to the authenticated HTTP/2 connection.
     pub fn http_client(&self) -> &reqwest::Client {
         &self.client
@@ -243,7 +243,7 @@ impl PortalClient {
     pub fn configure_stealth_client(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
         // --- THE ABSOLUTE (v2.2.0) ---
         //
-        // Absolute Method 2: JA3 Soft Mirroring — use reqwest's built-in rustls
+        // Absolute Method 2: JA3 Soft Mirroring -- use reqwest's built-in rustls
         // backend with TLS 1.0-1.2 to match MAG254 TLS fingerprint.
         // Hard cipher-suite pinning was lost in the rustls 0.21→0.23 upgrade,
         // but reqwest/rustls 0.23 defaults are close enough for most CDNs.
@@ -328,7 +328,7 @@ impl PortalClient {
             Err(_) => return,
         };
         let host = parsed.host_str().unwrap_or("").to_string();
-        // api_url() forces HTTPS — use 443 unless explicit non-standard port
+        // api_url() forces HTTPS -- use 443 unless explicit non-standard port
         let port = match parsed.port() {
             Some(80) | None => 443,
             Some(p) => p,
@@ -638,9 +638,9 @@ impl PortalClient {
         // so stream=XXXXX must be a top-level POST parameter, not URL-encoded inside cmd.
         let stream_id = crate::proxy::extract_stream_id(cmd);
         let url = format!("{}?type=itv&action=create_link&JsHttpRequest=1-xml", self.api_url());
-        // Build the raw form body manually — reqwest's .form() URL-encodes & in cmd values
+        // Build the raw form body manually -- reqwest's .form() URL-encodes & in cmd values
         // which prevents the portal from extracting stream/mac/sn from inside the cmd URL.
-        // Send cmd RAW — the portal's PHP parser splits embedded &params
+        // Send cmd RAW -- the portal's PHP parser splits embedded &params
         // as top-level form fields. URL-encoding the cmd would hide stream=XXXXX
         // from the parser, making it return stream= (empty).
         let body_str = if stream_id.is_empty() {
@@ -720,7 +720,7 @@ impl PortalClient {
     /// Segments are served from the streamer IP with no MAC/play_token validation,
     /// enabling true multi-device simultaneous playback.
     pub async fn fetch_stream(&self, cmd: &str) -> Result<(Vec<u8>, reqwest::header::HeaderMap), Box<dyn std::error::Error + Send + Sync>> {
-        // Check HLS cache first (5s TTL — covers rapid re-fetches during playback)
+        // Check HLS cache first (5s TTL -- covers rapid re-fetches during playback)
         let stream_id = crate::proxy::extract_stream_id(cmd);
         {
             let cache = self.hls_cache.read().await;
@@ -740,7 +740,7 @@ impl PortalClient {
             .replace(":80/", "/")
             .replace("extension=ts", "extension=m3u8");
 
-        // Don't follow redirect — capture the streamer location for segment rewriting.
+        // Don't follow redirect -- capture the streamer location for segment rewriting.
         let no_redirect_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(10))

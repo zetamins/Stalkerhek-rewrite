@@ -23,7 +23,7 @@ pub(crate) struct IdentityEntry {
 }
 
 /// European residential ISP blocks used for EDNS Client Subnet and IP spoofing.
-/// 22 blocks across 10 countries — each with verified ISP and correct timezone.
+/// 22 blocks across 10 countries -- each with verified ISP and correct timezone.
 struct EuBlock {
     prefix: &'static str,
     tz: &'static str,
@@ -82,7 +82,7 @@ pub fn get_sticky_european_identity(hostname: &str) -> (String, String) {
     (entry.ip, entry.tz)
 }
 
-/// Full European identity — returns IP, timezone, Accept-Language, and country code.
+/// Full European identity -- returns IP, timezone, Accept-Language, and country code.
 fn get_or_create_identity(hostname: &str) -> IdentityEntry {
     let mut cache = IDENTITY_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(entry) = cache.get(hostname) {
@@ -173,7 +173,7 @@ static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::
 /// pointing to European IP ranges. This causes authoritative DNS servers to return
 /// European CDN/Cloudflare edge IPs, bypassing geo-DNS.
 ///
-/// This is how the engine avoids VPNs: it doesn't tunnel traffic — it tricks DNS into
+/// This is how the engine avoids VPNs: it doesn't tunnel traffic -- it tricks DNS into
 /// giving European IPs, then connects directly to those European CDN edges. The TCP
 /// source IP is still the real one, but the connection terminates at a European edge
 /// node that sees European HTTP headers and passes the traffic through.
@@ -194,10 +194,10 @@ pub async fn resolve_european(hostname: &str) -> Vec<IpAddr> {
         format!("{}.{}.{}", block.prefix, rand::thread_rng().gen_range(1..254), rand::thread_rng().gen_range(1..254))
     };
 
-    // Multi-DoH provider pool — only providers verified working with ECS from all regions.
+    // Multi-DoH provider pool -- only providers verified working with ECS from all regions.
     // Google DNS returns the most answers (best ECS support), Cloudflare + NextDNS as rotation.
     let providers: &[(&str, &str)] = &[
-        ("https://dns.google/resolve",           "application/dns-json"),  // Google — excellent ECS support
+        ("https://dns.google/resolve",           "application/dns-json"),  // Google -- excellent ECS support
         ("https://cloudflare-dns.com/dns-query", "application/dns-json"),  // Cloudflare
         ("https://dns.nextdns.io/dns-query",     "application/dns-json"),  // NextDNS
     ];
@@ -296,7 +296,7 @@ pub async fn get_european_timezone(hostname: &str) -> String {
 }
 
 /// Detect the server's real local timezone via ip-api.com (no IP spoofing).
-/// Cached for 24 hours — the server's physical location rarely changes.
+/// Cached for 24 hours -- the server's physical location rarely changes.
 pub async fn get_local_timezone() -> String {
     static LOCAL_TZ: std::sync::OnceLock<tokio::sync::Mutex<Option<(String, Instant)>>> = std::sync::OnceLock::new();
     let lock = LOCAL_TZ.get_or_init(|| tokio::sync::Mutex::new(None));
@@ -308,7 +308,7 @@ pub async fn get_local_timezone() -> String {
             }
         }
     }
-    // Query ip-api.com with real IP — no ECS, no spoofing
+    // Query ip-api.com with real IP -- no ECS, no spoofing
     let tz = match HTTP_CLIENT.get("http://ip-api.com/json/?fields=timezone")
         .timeout(Duration::from_secs(5))
         .send().await

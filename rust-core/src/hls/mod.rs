@@ -221,8 +221,8 @@ async fn channel_handler(
     let scheme = scheme_from_request(&req);
     let host = host_from_request(&req);
 
-    // Direct CDN URLs (not through portal's /play/live.php) — proxy directly.
-    // Portal stream URLs (tres.4vps.info/play/live.php) — use fetch_stream
+    // Direct CDN URLs (not through portal's /play/live.php) -- proxy directly.
+    // Portal stream URLs (tres.4vps.info/play/live.php) -- use fetch_stream
     // which does create_link + get on same connection.
     if suffix.is_empty() {
         let is_direct_cdn = !stream_url.contains("/play/live.php");
@@ -456,7 +456,7 @@ fn url_decode(s: &str) -> String {
             if let Ok(byte) = u8::from_str_radix(&hex, 16) {
                 bytes.push(byte);
             } else {
-                // Invalid escape — pass through literally
+                // Invalid escape -- pass through literally
                 bytes.push(b'%');
                 bytes.extend_from_slice(hex.as_bytes());
             }
