@@ -106,7 +106,6 @@ pub struct PortalClient {
     pub serial_number: String,
     pub device_id: String,
     pub device_id2: String,
-    #[allow(dead_code)]
     pub signature: String,
     pub model: String,
     pub timezone: String,
