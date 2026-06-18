@@ -712,35 +712,14 @@ impl PortalClient {
         Ok(())
     }
 
-    /// Fetch a stream URL via create_link and return the response.
-    /// NOTE: The portal's stream server at /play/live.php geo-blocks non-European IPs.
-    /// Only direct CDN channels (not routed through the portal's play/live.php) will work.
-    /// Get HLS stream via create_link + m3u8 playlist fetch.
-    /// Uses extension=m3u8 for HLS playlist with unprotected .ts segments.
-    /// Segments are served from the streamer IP with no MAC/play_token validation,
-    /// enabling true multi-device simultaneous playback.
     pub async fn fetch_stream(&self, cmd: &str) -> Result<(Vec<u8>, reqwest::header::HeaderMap), Box<dyn std::error::Error + Send + Sync>> {
-        // Check HLS cache first (5s TTL -- covers rapid re-fetches during playback)
-        let stream_id = crate::proxy::extract_stream_id(cmd);
-        {
-            let cache = self.hls_cache.read().await;
-            if let Some((data, expiry)) = cache.get(&stream_id) {
-                if *expiry > std::time::Instant::now() {
-                    let mut headers = reqwest::header::HeaderMap::new();
-                    headers.insert(reqwest::header::CONTENT_TYPE,
-                        reqwest::header::HeaderValue::from_static("application/vnd.apple.mpegurl"));
-                    return Ok((data.clone(), headers));
-                }
-            }
-        }
-
         let ts_url = self.create_link(cmd).await?;
         let m3u8_url = ts_url
             .replacen("http://", "https://", 1)
             .replace(":80/", "/")
             .replace("extension=ts", "extension=m3u8");
 
-        // Don't follow redirect -- capture the streamer location for segment rewriting.
+        // Don't follow redirect — capture the streamer location for segment rewriting.
         let no_redirect_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(10))
@@ -775,11 +754,6 @@ impl PortalClient {
 
                 // Rewrite relative segment paths to absolute streamer URLs (no token path)
                 let rewritten = Self::rewrite_hls_segments(&playlist_body, &streamer_base);
-                // Cache for 5s to reduce create_link load during playback
-                {
-                    let mut cache = self.hls_cache.write().await;
-                    cache.insert(stream_id, (rewritten.clone().into_bytes(), std::time::Instant::now() + std::time::Duration::from_secs(5)));
-                }
                 let mut headers = reqwest::header::HeaderMap::new();
                 headers.insert(reqwest::header::CONTENT_TYPE,
                     reqwest::header::HeaderValue::from_static("application/vnd.apple.mpegurl"));
