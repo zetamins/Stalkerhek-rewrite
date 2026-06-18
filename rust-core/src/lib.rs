@@ -56,7 +56,7 @@ impl Default for ProfileConfig {
             password: String::new(),
             hls_port: 4600,
             proxy_port: 4800,
-            timezone: "UTC".to_string(),
+            timezone: String::new(),
             serial_number: "0000000000000".to_string(),
             device_id: "f".repeat(64),
             device_id2: "f".repeat(64),

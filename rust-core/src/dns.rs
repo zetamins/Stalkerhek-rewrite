@@ -294,3 +294,32 @@ pub async fn get_european_timezone(hostname: &str) -> String {
 
     tz
 }
+
+/// Detect the server's real local timezone via ip-api.com (no IP spoofing).
+/// Cached for 24 hours — the server's physical location rarely changes.
+pub async fn get_local_timezone() -> String {
+    static LOCAL_TZ: std::sync::OnceLock<tokio::sync::Mutex<Option<(String, Instant)>>> = std::sync::OnceLock::new();
+    let lock = LOCAL_TZ.get_or_init(|| tokio::sync::Mutex::new(None));
+    {
+        let cached = lock.lock().await;
+        if let Some((tz, expires)) = cached.as_ref() {
+            if *expires > Instant::now() {
+                return tz.clone();
+            }
+        }
+    }
+    // Query ip-api.com with real IP — no ECS, no spoofing
+    let tz = match HTTP_CLIENT.get("http://ip-api.com/json/?fields=timezone")
+        .timeout(Duration::from_secs(5))
+        .send().await
+    {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(data) => data["timezone"].as_str().unwrap_or("UTC").to_string(),
+            Err(_) => "UTC".to_string(),
+        },
+        Err(_) => "UTC".to_string(),
+    };
+    let mut cached = lock.lock().await;
+    *cached = Some((tz.clone(), Instant::now() + Duration::from_secs(86400)));
+    tz
+}
