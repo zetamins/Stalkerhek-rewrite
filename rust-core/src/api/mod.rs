@@ -870,16 +870,26 @@ async fn search_channels(
 async fn health_detail(State(st): State<AppState>) -> impl IntoResponse {
     let runners = st.runners.read().await;
     let profiles = st.profiles.read().await;
-    let profile_health: Vec<serde_json::Value> = profiles.iter().map(|p| {
-        let running = runners.iter().any(|r| r.config.id == p.id);
-        serde_json::json!({
+    let mut profile_health = Vec::new();
+    for p in profiles.iter() {
+        let runner = runners.iter().find(|r| r.config.id == p.id);
+        let (running, channels, phase, msg) = if let Some(r) = runner {
+            let status = r.status.read().await;
+            (true, status.channels_count, status.phase.clone(), status.message.clone())
+        } else {
+            (false, 0, "idle".to_string(), "Not started".to_string())
+        };
+        profile_health.push(serde_json::json!({
             "id": p.id,
             "name": p.name,
             "running": running,
-            "hls_port": p.hls_port,
-            "proxy_port": p.proxy_port,
-        })
-    }).collect();
+            "channels": channels,
+            "phase": phase,
+            "message": msg,
+            "hls_addr": if running { format!(":{}", p.hls_port) } else { String::new() },
+            "proxy_addr": if running { format!(":{}", p.proxy_port) } else { String::new() },
+        }));
+    }
     Json(serde_json::json!({
         "status": "ok",
         "profiles_total": profiles.len(),

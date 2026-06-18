@@ -116,6 +116,9 @@ pub struct PortalClient {
     /// ETag cache: stores the latest ETag value per endpoint path for conditional requests.
     /// Prevents re-downloading unchanged data (channel lists, EPG, categories).
     etags: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+    /// HLS playlist cache: caches playlist responses for 5s to reduce create_link API calls
+    /// when the STB player re-fetches frequently during playback.
+    hls_cache: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, (Vec<u8>, std::time::Instant)>>>,
 }
 
 impl PortalClient {
@@ -313,6 +316,7 @@ impl PortalClient {
             device_id2, signature, model, timezone, device_id_auth,
             token: String::new(), incarnation: 0, client,
             etags: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            hls_cache: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -716,6 +720,20 @@ impl PortalClient {
     /// Segments are served from the streamer IP with no MAC/play_token validation,
     /// enabling true multi-device simultaneous playback.
     pub async fn fetch_stream(&self, cmd: &str) -> Result<(Vec<u8>, reqwest::header::HeaderMap), Box<dyn std::error::Error + Send + Sync>> {
+        // Check HLS cache first (5s TTL — covers rapid re-fetches during playback)
+        let stream_id = crate::proxy::extract_stream_id(cmd);
+        {
+            let cache = self.hls_cache.read().await;
+            if let Some((data, expiry)) = cache.get(&stream_id) {
+                if *expiry > std::time::Instant::now() {
+                    let mut headers = reqwest::header::HeaderMap::new();
+                    headers.insert(reqwest::header::CONTENT_TYPE,
+                        reqwest::header::HeaderValue::from_static("application/vnd.apple.mpegurl"));
+                    return Ok((data.clone(), headers));
+                }
+            }
+        }
+
         let ts_url = self.create_link(cmd).await?;
         let m3u8_url = ts_url
             .replacen("http://", "https://", 1)
@@ -757,6 +775,11 @@ impl PortalClient {
 
                 // Rewrite relative segment paths to absolute streamer URLs (no token path)
                 let rewritten = Self::rewrite_hls_segments(&playlist_body, &streamer_base);
+                // Cache for 5s to reduce create_link load during playback
+                {
+                    let mut cache = self.hls_cache.write().await;
+                    cache.insert(stream_id, (rewritten.clone().into_bytes(), std::time::Instant::now() + std::time::Duration::from_secs(5)));
+                }
                 let mut headers = reqwest::header::HeaderMap::new();
                 headers.insert(reqwest::header::CONTENT_TYPE,
                     reqwest::header::HeaderValue::from_static("application/vnd.apple.mpegurl"));
