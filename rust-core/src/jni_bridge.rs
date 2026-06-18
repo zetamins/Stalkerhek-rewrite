@@ -41,7 +41,7 @@ pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeInit<
     _class: JClass<'local>,
     data_dir: JString<'local>,
 ) -> jstring {
-    let dir: String = jstring_to_string(env, &data_dir);
+    let dir: String = jstring_to_string(&mut env, &data_dir);
     let data_path = PathBuf::from(&dir);
 
     android_logger::init_once(
@@ -150,7 +150,7 @@ pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeStart
     _class: JClass<'local>,
     profile_json: JString<'local>,
 ) -> jstring {
-    let json_str: String = jstring_to_string(env, &profile_json);
+    let json_str: String = jstring_to_string(&mut env, &profile_json);
     let profile: ProfileConfig = match serde_json::from_str(&json_str) {
         Ok(p) => p,
         Err(e) => {
@@ -284,7 +284,7 @@ pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeGetCh
     profile_id: jint,
     media_type: JString<'local>,
 ) -> jstring {
-    let type_str: String = jstring_to_string(env, &media_type);
+    let type_str: String = jstring_to_string(&mut env, &media_type);
     let engine = get_engine();
     let json = engine.runtime.block_on(async {
         let runners = engine.state.runners.read().await;
@@ -336,7 +336,7 @@ pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeGetCa
     profile_id: jint,
     media_type: JString<'local>,
 ) -> jstring {
-    let type_str: String = jstring_to_string(env, &media_type);
+    let type_str: String = jstring_to_string(&mut env, &media_type);
     let engine = get_engine();
     let json = engine.runtime.block_on(async {
         let runners = engine.state.runners.read().await;
@@ -376,7 +376,7 @@ pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeCreat
     _class: JClass<'local>,
     profile_json: JString<'local>,
 ) -> jstring {
-    let json_str: String = jstring_to_string(env, &profile_json);
+    let json_str: String = jstring_to_string(&mut env, &profile_json);
     let profile: ProfileConfig = match serde_json::from_str(&json_str) {
         Ok(p) => p,
         Err(e) => {
@@ -447,7 +447,7 @@ pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeFilte
     _class: JClass<'local>,
     action_json: JString<'local>,
 ) -> jstring {
-    let json_str: String = jstring_to_string(env, &action_json);
+    let json_str: String = jstring_to_string(&mut env, &action_json);
     let req: Map<String, String> = match serde_json::from_str(&json_str) {
         Ok(m) => m,
         Err(_) => {
@@ -514,7 +514,7 @@ pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeSyncF
     _class: JClass<'local>,
     snapshot_json: JString<'local>,
 ) -> jstring {
-    let json_str: String = jstring_to_string(env, &snapshot_json);
+    let json_str: String = jstring_to_string(&mut env, &snapshot_json);
     let snapshot: std::collections::HashMap<i32, crate::api::SyncFilterState> =
         match serde_json::from_str(&json_str) {
             Ok(s) => s,
