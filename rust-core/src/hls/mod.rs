@@ -19,12 +19,17 @@ use crate::stalker;
 
 // Quality ranking for resolution tags (appear as last word in channel titles).
 // Higher rank = better quality. Untagged channels get rank 1.
+// Handles both ASCII and Unicode variants (e.g. "ᴴᴰ" = small-caps HD, "ʰᵉᵛᶜ" = small-caps HEVC).
 fn resolution_rank(title: &str) -> u8 {
     let last = title.rsplit(' ').next().unwrap_or("");
     match last {
-        "4K" | "UHD" => 5,
-        "HEVC" | "FHD" => 4,
-        "HD" | "HDR" => 3,
+        // 4K tier
+        "4K" | "UHD" | "4K+" | "⁸ᴷ" => 5,
+        // FHD/HEVC tier (including small-caps Unicode variants)
+        "HEVC" | "FHD" | "HDR" | "RAW" | "ᴿᴬᵂ" | "ʰᵉᵛᶜ" => 4,
+        // HD tier (including small-caps Unicode variant)
+        "HD" | "ᴴᴰ" => 3,
+        // SD tier
         "SD" => 2,
         _ => 1,
     }
@@ -34,7 +39,6 @@ fn resolution_rank(title: &str) -> u8 {
 fn base_name(title: &str) -> &str {
     let rank = resolution_rank(title);
     if rank > 1 {
-        // Strip the last word if it's a known resolution tag
         if let Some(pos) = title.rfind(' ') {
             return &title[..pos];
         }
