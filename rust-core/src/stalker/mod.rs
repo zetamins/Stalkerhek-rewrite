@@ -734,99 +734,101 @@ impl PortalClient {
 
     pub async fn fetch_stream(&self, cmd: &str) -> Result<(Vec<u8>, reqwest::header::HeaderMap), Box<dyn std::error::Error + Send + Sync>> {
         let ts_url = self.create_link(cmd).await?;
+        // Keep original HTTP URL, TS extension, port 80 — change only to m3u8.
+        // The streamer IP bypasses Cloudflare entirely.
         let m3u8_url = ts_url
-            .replacen("http://", "https://", 1)
-            .replace(":80/", "/")
-            .replace("extension=ts", "extension=m3u8");
+            .replacen("extension=ts", "extension=m3u8", 1);
 
-        // Don't follow redirect — capture the streamer location for segment rewriting.
-        // Use stealth-configured client to match the proxy's TLS fingerprint that
-        // successfully reaches the portal without Cloudflare 458 blocks.
-        let no_redirect_client = Self::configure_stealth_client(reqwest::Client::builder())
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(10))
-            .build()?;
+        // Streamer IP pool — directly reachable, NO Cloudflare.
+        // These IPs relay requests to the portal origin internally.
+        let streamer_ips = [
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(185, 245, 0, 132)),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(185, 245, 0, 131)),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(185, 245, 0, 133)),
+        ];
 
-        let mut portal_resp = no_redirect_client.get(&m3u8_url)
-            .headers(self.headers())
-            .send().await?;
+        for &streamer_ip in &streamer_ips {
+            // Build a client that pins the portal hostname to the streamer IP.
+            // TCP goes to streamer (no Cloudflare), Host header = portal domain.
+            let pinned = match reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(15))
+                .resolve("tres.4vps.info", std::net::SocketAddr::new(streamer_ip, 80))
+                .build() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
 
-        let status = portal_resp.status().as_u16();
+            let resp = match pinned.get(&m3u8_url)
+                .header("User-Agent", "MAG254")
+                .send().await {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
 
-        // Cloudflare geo-block (458): retry with streamer IP resolve.
-        // Streamer IPs are directly reachable, no Cloudflare. Use a plain
-        // HTTP client without the stealth TLS baggage meant for HTTPS.
-        if status == 458 || status == 444 {
-            let streamer_ips = ["185.245.0.132", "185.245.0.131", "185.245.0.133"];
-            for &ip in &streamer_ips {
-                let ip_addr: std::net::IpAddr = match ip.parse() { Ok(a) => a, Err(_) => continue };
-                let pinned = match reqwest::Client::builder()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .timeout(std::time::Duration::from_secs(15))
-                    .resolve("tres.4vps.info", std::net::SocketAddr::new(ip_addr, 80))
-                    .build() {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-                match pinned.get(&m3u8_url)
-                    .header("User-Agent", "MAG254")
-                    .send().await {
-                    Ok(resp) => {
-                        let s = resp.status().as_u16();
-                        tracing::info!("[HLS] streamer {} returned HTTP {} (fallback for 458)", ip, s);
-                        if s == 302 || (s == 200) {
-                            portal_resp = resp;
-                            break;
-                        }
+            let status = resp.status().as_u16();
+
+            // Handle redirect manually — capture the Location header
+            if status == 302 {
+                if let Some(loc) = resp.headers().get(reqwest::header::LOCATION) {
+                    let redirect_url = loc.to_str().unwrap_or("").to_string();
+                    tracing::info!("[HLS] streamer {} redirect → {}", streamer_ip, &redirect_url[..redirect_url.len().min(80)]);
+
+                    let streamer_base = match url::Url::parse(&redirect_url) {
+                        Ok(u) => format!("{}://{}", u.scheme(), u.host_str().unwrap_or("")),
+                        Err(_) => redirect_url.clone(),
+                    };
+
+                    // Fetch the redirect target (goes to streamer directly, no Cloudflare)
+                    let red_client = reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .timeout(std::time::Duration::from_secs(10))
+                        .build()?;
+                    let red_resp = red_client.get(&redirect_url)
+                        .header("User-Agent", "MAG254")
+                        .send().await?;
+                    let red_status = red_resp.status().as_u16();
+                    if red_status >= 400 {
+                        tracing::warn!("[HLS] redirect target HTTP {}: {}", red_status, redirect_url);
+                        continue;
                     }
-                    Err(_) => continue,
+                    let playlist_body = red_resp.bytes().await?.to_vec();
+                    if playlist_body.is_empty() || !playlist_body.starts_with(b"#EXTM3U") {
+                        tracing::warn!("[HLS] redirect target gave empty body");
+                        continue;
+                    }
+                    let rewritten = Self::rewrite_hls_segments(&playlist_body, &streamer_base);
+                    let mut headers = reqwest::header::HeaderMap::new();
+                    headers.insert(reqwest::header::CONTENT_TYPE,
+                        reqwest::header::HeaderValue::from_static("application/vnd.apple.mpegurl"));
+                    tracing::info!("[HLS] redirect target served {} bytes", rewritten.len());
+                    return Ok((rewritten.into_bytes(), headers));
                 }
+            }
+
+            // 200 with valid playlist body
+            if status == 200 {
+                let playlist_body = resp.bytes().await?.to_vec();
+                if !playlist_body.is_empty() && playlist_body.starts_with(b"#EXTM3U") {
+                    let streamer_base = format!("http://{}", streamer_ip);
+                    let rewritten = Self::rewrite_hls_segments(&playlist_body, &streamer_base);
+                    let mut headers = reqwest::header::HeaderMap::new();
+                    headers.insert(reqwest::header::CONTENT_TYPE,
+                        reqwest::header::HeaderValue::from_static("application/vnd.apple.mpegurl"));
+                    tracing::info!("[HLS] streamer {} served playlist ({} bytes)", streamer_ip, rewritten.len());
+                    return Ok((rewritten.into_bytes(), headers));
+                }
+                tracing::warn!("[HLS] streamer {} returned empty body", streamer_ip);
+                continue;
+            }
+
+            tracing::warn!("[HLS] streamer {} returned HTTP {}", streamer_ip, status);
+            if status >= 400 {
+                continue;
             }
         }
 
-        let playlist_body: Vec<u8>;
-        if portal_resp.status().as_u16() == 302 {
-            // Follow HTTPS→HTTP redirect manually
-            if let Some(loc) = portal_resp.headers().get(reqwest::header::LOCATION) {
-                let streamer_url = loc.to_str().unwrap_or("").to_string();
-                // Extract base: "http://185.245.0.132:80" (strip /live/play/TOKEN path)
-                let streamer_base = match url::Url::parse(&streamer_url) {
-                    Ok(u) => format!("{}://{}", u.scheme(), u.host_str().unwrap_or("")),
-                    Err(_) => streamer_url.clone(),
-                };
-
-                let streamer_client = reqwest::Client::builder()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .timeout(std::time::Duration::from_secs(10))
-                    .build()?;
-                let seg_resp = streamer_client.get(&streamer_url)
-                    .header("User-Agent", "MAG254")
-                    .send().await?;
-                if seg_resp.status().as_u16() >= 400 {
-                    return Err(format!("Streamer HTTP {} for playlist", seg_resp.status().as_u16()).into());
-                }
-                playlist_body = seg_resp.bytes().await?.to_vec();
-
-                // Rewrite relative segment paths to absolute streamer URLs (no token path)
-                let rewritten = Self::rewrite_hls_segments(&playlist_body, &streamer_base);
-                let mut headers = reqwest::header::HeaderMap::new();
-                headers.insert(reqwest::header::CONTENT_TYPE,
-                    reqwest::header::HeaderValue::from_static("application/vnd.apple.mpegurl"));
-                return Ok((rewritten.into_bytes(), headers));
-            }
-        }
-        let fallback_status = portal_resp.status().as_u16();
-        playlist_body = portal_resp.bytes().await?.to_vec();
-        // Reject empty playlists — Cloudflare 458, streamer 200-empty, etc.
-        // Returning an error lets the HLS layer try quality fallback.
-        if playlist_body.is_empty() || !playlist_body.starts_with(b"#EXTM3U") {
-            return Err(format!("Portal returned {} with empty/non-playlist body ({} bytes)",
-                fallback_status, playlist_body.len()).into());
-        }
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(reqwest::header::CONTENT_TYPE,
-            reqwest::header::HeaderValue::from_static("application/vnd.apple.mpegurl"));
-        Ok((playlist_body, headers))
+        Err("All streamer IPs failed to serve the playlist".into())
     }
 
     /// Rewrite relative segment paths in an HLS playlist to absolute streamer URLs.
