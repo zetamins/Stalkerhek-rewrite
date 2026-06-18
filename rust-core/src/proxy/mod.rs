@@ -811,18 +811,3 @@ fn url_encode(s: &str) -> String {
     out
 }
 
-fn chrono_now_str() -> String {
-    // Simple UTC timestamp without chrono dependency
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
-    let days = secs / 86400;
-    // Rough date calculation from epoch (good enough for STB "now" field)
-    let y = 1970 + days / 365;
-    let d = (days % 365) + 1;
-    let mo = (d / 30).min(11) + 1;
-    let dy = (d % 30) + 1;
-    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, mo, dy, h, m, s)
-}
