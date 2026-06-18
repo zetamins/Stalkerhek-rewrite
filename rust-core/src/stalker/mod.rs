@@ -317,93 +317,38 @@ impl PortalClient {
         }
     }
 
-    /// Try to build a client pinned to a specific port and verify it can reach the portal.
-    async fn try_port(host: &str, port: u16, ips: &[std::net::IpAddr], ua: &str, timeout_secs: u64) -> Option<reqwest::Client> {
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(timeout_secs))
-            .user_agent(ua)
-            .danger_accept_invalid_certs(false);
-        builder = Self::configure_stealth_client(builder);
-        if !ips.is_empty() {
-            builder = builder.resolve(host, SocketAddr::new(ips[0], port));
-        }
-        let client = builder.build().ok()?;
-        let probe_url = format!("https://{}:{}/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml", host, port);
-        if client.post(&probe_url)
-            .form(&[("mac", "00:1A:79:00:00:00"), ("sn", "0000000000000"), ("stb_type", "MAG254")])
-            .timeout(std::time::Duration::from_secs(timeout_secs))
-            .send().await.is_ok() {
-            tracing::info!("[STALKER] portal reachable on port {}", port);
-            Some(client)
-        } else {
-            None
-        }
-    }
-
     /// Rebuild the internal client with European DNS resolution.
-    /// Probes ports to find the working HTTPS endpoint — some portals use
-    /// non-standard ports or have port 80 in the URL but serve API on 443.
+    /// Uses port 443 for HTTPS API access (auto-upgraded from HTTP port 80).
     pub async fn resolve_eu_dns(&mut self) {
         let parsed = match url::Url::parse(&self.base_url) {
             Ok(u) => u,
             Err(_) => return,
         };
         let host = parsed.host_str().unwrap_or("").to_string();
+        // api_url() forces HTTPS — use 443 unless explicit non-standard port
+        let port = match parsed.port() {
+            Some(80) | None => 443,
+            Some(p) => p,
+        };
         let ips = dns::resolve_european(&host).await;
 
         let fp = model_fingerprint(&self.model);
-        let ua_str = format!(
+        let ua = format!(
             "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/{} (KHTML, like Gecko) {} stbapp ver: {} rev: 2034 Mobile Safari/{}",
             fp.webkit_ver, self.model, fp.stbapp_major, fp.safari_ver
         );
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .user_agent(ua)
+            .danger_accept_invalid_certs(false);
 
-        // Probe candidate ports in order. First to respond wins.
-        // Covers common Stalker/Ministry portal ports plus custom configurations.
-        let explicit_port = parsed.port();
-        let mut candidates = vec![443u16];
-        if let Some(p) = explicit_port {
-            if p != 443 { candidates.push(p); }
-        }
-        // Common Stalker/nginx/Apache HTTPS and HTTP-alt ports
-        for &p in &[8443u16, 8080, 25461, 88, 8880, 8000, 8181, 2083, 2087, 2096] {
-            if !candidates.contains(&p) { candidates.push(p); }
-        }
+        builder = Self::configure_stealth_client(builder);
 
-        let mut best_client = None;
-        // Fast probe (2s) for most likely ports first, then wider scan (1s) for the rest
-        let priority_ports: Vec<u16> = candidates.iter().take(3).copied().collect();
-        let rest_ports: Vec<u16> = candidates.iter().skip(3).copied().collect();
-
-        for &port in &priority_ports {
-            if let Some(c) = Self::try_port(&host, port, &ips, &ua_str, 2).await {
-                best_client = Some(c);
-                break;
-            }
+        if !ips.is_empty() {
+            builder = builder.resolve(&host, SocketAddr::new(ips[0], port));
         }
-        if best_client.is_none() {
-            // Sequential quick probe for remaining ports (1s each)
-            for &port in &rest_ports {
-                if let Some(c) = Self::try_port(&host, port, &ips, &ua_str, 1).await {
-                    best_client = Some(c);
-                    break;
-                }
-            }
-        } else {
-            // priority port found — already logged in try_port
-        }
-        if let Some(client) = best_client {
+        if let Ok(client) = builder.build() {
             self.client = client;
-        } else if !ips.is_empty() {
-            // Fallback: build with port 443 even if probe failed
-            let mut builder = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(60))
-                .user_agent(&ua_str)
-                .danger_accept_invalid_certs(false);
-            builder = Self::configure_stealth_client(builder);
-            builder = builder.resolve(&host, SocketAddr::new(ips[0], 443));
-            if let Ok(client) = builder.build() {
-                self.client = client;
-            }
         }
     }
 
@@ -767,26 +712,88 @@ impl PortalClient {
     /// Fetch a stream URL via create_link and return the response.
     /// NOTE: The portal's stream server at /play/live.php geo-blocks non-European IPs.
     /// Only direct CDN channels (not routed through the portal's play/live.php) will work.
+    /// Get HLS stream via create_link + m3u8 playlist fetch.
+    /// Uses extension=m3u8 for HLS playlist with unprotected .ts segments.
+    /// Segments are served from the streamer IP with no MAC/play_token validation,
+    /// enabling true multi-device simultaneous playback.
     pub async fn fetch_stream(&self, cmd: &str) -> Result<(Vec<u8>, reqwest::header::HeaderMap), Box<dyn std::error::Error + Send + Sync>> {
-        let url = self.create_link(cmd).await?;
-        let https_url = url.replacen("http://", "https://", 1).replace(":80/", "/");
-        let host_str = url::Url::parse(&https_url).ok()
-            .and_then(|u| u.host_str().map(|s| s.to_string()))
-            .unwrap_or_default();
-        let (_, tz) = crate::dns::get_sticky_european_identity(&host_str);
-        let resp = self.client.get(&https_url)
-            .header("User-Agent", format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 250 Mobile Safari/533.3", self.model))
-            .header("Cookie", format!("PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};", &self.serial_number, &self.mac, tz))
-            .header("Accept", "*/*")
+        let ts_url = self.create_link(cmd).await?;
+        let m3u8_url = ts_url
+            .replacen("http://", "https://", 1)
+            .replace(":80/", "/")
+            .replace("extension=ts", "extension=m3u8");
+
+        // Don't follow redirect — capture the streamer location for segment rewriting.
+        let no_redirect_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
+
+        let portal_resp = no_redirect_client.get(&m3u8_url)
+            .header("User-Agent", "MAG254")
             .send().await?;
-        let status = resp.status();
-        let headers = resp.headers().clone();
-        let body = resp.bytes().await?.to_vec();
-        if status.as_u16() >= 400 {
-            let preview = String::from_utf8_lossy(&body).chars().take(200).collect::<String>();
-            return Err(format!("Stream HTTP {}: {}", status.as_u16(), preview).into());
+
+        let playlist_body: Vec<u8>;
+        if portal_resp.status().as_u16() == 302 {
+            // Follow HTTPS→HTTP redirect manually
+            if let Some(loc) = portal_resp.headers().get(reqwest::header::LOCATION) {
+                let streamer_url = loc.to_str().unwrap_or("").to_string();
+                // Extract base: "http://185.245.0.132:80" (strip /live/play/TOKEN path)
+                let streamer_base = match url::Url::parse(&streamer_url) {
+                    Ok(u) => format!("{}://{}", u.scheme(), u.host_str().unwrap_or("")),
+                    Err(_) => streamer_url.clone(),
+                };
+
+                let streamer_client = reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()?;
+                let seg_resp = streamer_client.get(&streamer_url)
+                    .header("User-Agent", "MAG254")
+                    .send().await?;
+                if seg_resp.status().as_u16() >= 400 {
+                    return Err(format!("Streamer HTTP {} for playlist", seg_resp.status().as_u16()).into());
+                }
+                playlist_body = seg_resp.bytes().await?.to_vec();
+
+                // Rewrite relative segment paths to absolute streamer URLs (no token path)
+                let rewritten = Self::rewrite_hls_segments(&playlist_body, &streamer_base);
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert(reqwest::header::CONTENT_TYPE,
+                    reqwest::header::HeaderValue::from_static("application/vnd.apple.mpegurl"));
+                return Ok((rewritten.into_bytes(), headers));
+            }
         }
-        Ok((body, headers))
+        playlist_body = portal_resp.bytes().await?.to_vec();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/vnd.apple.mpegurl"));
+        Ok((playlist_body, headers))
+    }
+
+    /// Rewrite relative segment paths in an HLS playlist to absolute streamer URLs.
+    fn rewrite_hls_segments(playlist: &[u8], base_url: &str) -> String {
+        let base = base_url.trim_end_matches('/');
+        let mut out = String::with_capacity(playlist.len() + 256);
+        if let Ok(s) = std::str::from_utf8(playlist) {
+            for line in s.lines() {
+                if line.is_empty() {
+                    out.push('\n');
+                } else if line.starts_with('#') {
+                    out.push_str(line);
+                    out.push('\n');
+                } else {
+                    let segment = line.trim();
+                    if segment.starts_with('/') {
+                        out.push_str(&format!("{}{}", base, segment));
+                    } else {
+                        out.push_str(&format!("{}/{}", base, segment));
+                    }
+                    out.push('\n');
+                }
+            }
+        }
+        out
     }
 
     /// Produce a lightweight clone that can send the watchdog ping without

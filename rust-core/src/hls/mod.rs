@@ -258,23 +258,16 @@ async fn channel_handler(
                 }
             }
         }
-        // Portal stream: use fetch_stream (create_link + GET on same client)
+        // Portal stream: fetch_stream returns complete HLS playlist with
+        // absolute streamer URLs already rewritten into segment paths
         let pc = st.portal_client.read().await;
         match pc.fetch_stream(&cmd).await {
-            Ok((body_bytes, upstream_headers)) => {
-                let body_str = String::from_utf8_lossy(&body_bytes);
-                let rewritten = rewrite_m3u8(&body_str, &scheme, &host, &title);
-                let mut response = Response::builder().status(200);
-                for (k, v) in upstream_headers.iter() {
-                    let ks = k.as_str().to_lowercase();
-                    if !["host","connection","transfer-encoding","keep-alive","te","trailer","upgrade","content-encoding","content-type"].contains(&ks.as_str()) {
-                        response = response.header(k, v);
-                    }
-                }
-                return response
+            Ok((body_bytes, _upstream_headers)) => {
+                return Response::builder()
+                    .status(200)
                     .header("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8")
                     .header("Access-Control-Allow-Origin", "*")
-                    .body(Body::from(rewritten)).unwrap();
+                    .body(Body::from(body_bytes)).unwrap();
             }
             Err(e) => {
                 tracing::error!("[HLS] fetch_stream failed for {title}: {e}");
