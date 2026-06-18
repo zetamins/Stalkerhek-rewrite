@@ -150,7 +150,7 @@ async fn create_profile(
         password: req.password.unwrap_or_default(),
         hls_port: req.hls_port.unwrap_or(4600 + (new_id as u16).saturating_sub(1) * 2),
         proxy_port: req.proxy_port.unwrap_or(4601 + (new_id as u16).saturating_sub(1) * 2),
-        timezone: req.timezone.unwrap_or_else(|| "UTC".to_string()),
+        timezone: req.timezone.unwrap_or_default(),
         serial_number: req.serial_number.unwrap_or_else(|| "0000000000000".to_string()),
         device_id: req.device_id.unwrap_or_else(|| "f".repeat(64)),
         device_id2: req.device_id2.unwrap_or_else(|| "f".repeat(64)),
@@ -162,6 +162,11 @@ async fn create_profile(
         proxy_enabled: req.proxy_enabled.unwrap_or(true),
         proxy_rewrite: req.proxy_rewrite.unwrap_or(true),
     };
+    // Auto-detect local timezone if none provided
+    let mut cfg = cfg;
+    if cfg.timezone.is_empty() {
+        cfg.timezone = crate::dns::get_local_timezone().await;
+    }
     profiles.push(cfg.clone());
     save_profiles(&profiles, &st.data_dir);
     Json(cfg)
