@@ -36,7 +36,7 @@ fn jstring_to_string(env: &mut JNIEnv, s: &JString) -> String {
 // ─── nativeInit ────────────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeInit<'local>(
+pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeInit<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     data_dir: JString<'local>,
@@ -117,7 +117,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeInit
 // ─── nativeShutdown ────────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeShutdown<'local>(
+pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeShutdown<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {
@@ -145,7 +145,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeShut
 // ─── nativeStartProfile ────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeStartProfile<'local>(
+pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeStartProfile<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     profile_json: JString<'local>,
@@ -210,7 +210,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeStar
 // ─── nativeStopProfile ─────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeStopProfile<'local>(
+pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeStopProfile<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     profile_id: jint,
@@ -237,7 +237,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeStop
 // ─── nativeGetProfiles ─────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeGetProfiles<'local>(
+pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeGetProfiles<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {
@@ -252,7 +252,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeGetP
 // ─── nativeGetProfileStatus ────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeGetProfileStatus<'local>(
+pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeGetProfileStatus<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     profile_id: jint,
@@ -278,7 +278,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeGetP
 // ─── nativeGetChannels ─────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeGetChannels<'local>(
+pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeGetChannels<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     profile_id: jint,
@@ -330,7 +330,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeGetC
 // ─── nativeGetCategories ───────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeGetCategories<'local>(
+pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeGetCategories<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     profile_id: jint,
@@ -371,7 +371,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeGetC
 // ─── nativeCreateProfile ───────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeCreateProfile<'local>(
+pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeCreateProfile<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     profile_json: JString<'local>,
@@ -406,7 +406,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeCrea
 // ─── nativeDeleteProfile ───────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeDeleteProfile<'local>(
+pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeDeleteProfile<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     profile_id: jint,
@@ -442,7 +442,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeDele
 // ─── nativeFilterUpdate ────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeFilterUpdate<'local>(
+pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeFilterUpdate<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     action_json: JString<'local>,
@@ -509,7 +509,7 @@ fn apply_filter_action_mut(filters: &mut FilterStore, req: &Map<String, String>)
 // ─── nativeSyncFilters ─────────────────────────────────────────────────
 
 #[no_mangle]
-pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeSyncFilters<'local>(
+pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeSyncFilters<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     snapshot_json: JString<'local>,
@@ -538,7 +538,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeSync
 // ─── nativeGetFilterState (debug) ─────────────────────────────────────────
 
 #[no_mangle]
-pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeGetFilterState<'local>(
+pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeGetFilterState<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     profile_id: jint,
