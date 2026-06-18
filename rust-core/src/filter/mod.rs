@@ -29,15 +29,27 @@ impl FilterStore {
     /// Portals embed prefixes like "IT| Rai 1" or "UK| BBC TWO HD".
     /// This detects the `PREFIX| ` pattern and removes it transparently.
     pub fn strip_auto_prefix(title: &str) -> String {
+        // Normalize whitespace first
+        let mut s = String::with_capacity(title.len());
+        let mut last_was_space = false;
+        for c in title.chars() {
+            if c == ' ' {
+                if !last_was_space { s.push(' '); last_was_space = true; }
+            } else {
+                s.push(c);
+                last_was_space = false;
+            }
+        }
+        let title = s.trim().to_string();
+
         if let Some(pos) = title.find("| ") {
             let prefix = &title[..pos];
             // Prefix must be short (2-30 chars) and not contain spaces
-            // so we don't strip legitimate "|" usage in channel names
             if prefix.len() >= 2 && prefix.len() <= 30 && !prefix.contains(' ') {
                 return title[pos + 2..].to_string();
             }
         }
-        title.to_string()
+        title
     }
 
     pub fn apply_rename(&self, profile_id: i32, title: &str) -> String {

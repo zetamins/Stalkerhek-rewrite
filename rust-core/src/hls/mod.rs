@@ -17,33 +17,57 @@ use crate::dns;
 use crate::filter::FilterStore;
 use crate::stalker;
 
+// Normalize whitespace: collapse multiple spaces to single, trim.
+fn normalize_title(title: &str) -> String {
+    let mut s = String::with_capacity(title.len());
+    let mut last_was_space = false;
+    for c in title.chars() {
+        if c == ' ' {
+            if !last_was_space {
+                s.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            s.push(c);
+            last_was_space = false;
+        }
+    }
+    s.trim().to_string()
+}
+
 // Quality ranking for resolution tags (appear as last word in channel titles).
 // Higher rank = better quality. Untagged channels get rank 1.
-// Handles both ASCII and Unicode variants (e.g. "ᴴᴰ" = small-caps HD, "ʰᵉᵛᶜ" = small-caps HEVC).
 fn resolution_rank(title: &str) -> u8 {
     let last = title.rsplit(' ').next().unwrap_or("");
     match last {
-        // 4K tier
         "4K" | "UHD" | "4K+" | "⁸ᴷ" => 5,
-        // FHD/HEVC tier (including small-caps Unicode variants)
         "HEVC" | "FHD" | "HDR" | "RAW" | "ᴿᴬᵂ" | "ʰᵉᵛᶜ" => 4,
-        // HD tier (including small-caps Unicode variant)
         "HD" | "ᴴᴰ" => 3,
-        // SD tier
         "SD" => 2,
         _ => 1,
     }
 }
 
-/// Strip the resolution tag (last word) to get the base channel name.
-fn base_name(title: &str) -> &str {
-    let rank = resolution_rank(title);
-    if rank > 1 {
-        if let Some(pos) = title.rfind(' ') {
-            return &title[..pos];
-        }
+/// Strip resolution tags to get the base channel name.
+/// Handles compound tags like "HEVC FHD" or "HEVC HD" — strips both words.
+fn base_name(title: &str) -> String {
+    let words: Vec<&str> = title.rsplit(' ').collect();
+    let mut strip = 0;
+    for w in &words {
+        let rank = match *w {
+            "4K" | "UHD" | "4K+" | "⁸ᴷ" => 5,
+            "HEVC" | "FHD" | "HDR" | "RAW" | "ᴿᴬᵂ" | "ʰᵉᵛᶜ" => 4,
+            "HD" | "ᴴᴰ" => 3,
+            "SD" => 2,
+            _ => 0,
+        };
+        if rank > 0 { strip += 1; } else { break; }
     }
-    title
+    if strip == 0 {
+        return title.to_string();
+    }
+    let keep = words.len() - strip;
+    words[keep..].iter().rev().copied().collect::<Vec<_>>().join(" ")
 }
 
 #[derive(Clone)]
@@ -79,16 +103,18 @@ pub fn build_router(
     model: String,
 ) -> Router {
     let mut channel_map = HashMap::new();
-    let channel_states: Vec<ChannelState> = channels.into_iter().enumerate().map(|(i, ch)| {
+    let channel_states: Vec<ChannelState> = channels.into_iter().enumerate().map(|(i, mut ch)| {
+        // Normalize whitespace in title at load time
+        ch.title = normalize_title(&ch.title);
         channel_map.insert(ch.title.clone(), i);
         ChannelState { info: ch }
     }).collect();
 
-    // Build quality chains: group channels by base name (without resolution tag),
-    // sorted by quality (highest first). Used for automatic fallback.
+    // Build quality chains: group channels by base name (without resolution tags),
+    // sorted by quality (highest first). Handles compound tags like "HEVC FHD".
     let mut quality_chain: HashMap<String, Vec<String>> = HashMap::new();
     for ch in channel_states.iter() {
-        let base = base_name(&ch.info.title).to_string();
+        let base = base_name(&ch.info.title);
         if base != ch.info.title {
             quality_chain.entry(base)
                 .or_default()
@@ -199,21 +225,31 @@ async fn playlist_handler(
     let epg_url = format!("{}://{}/epg", scheme, host);
     let mut output = format!("#EXTM3U x-tvg-url=\"{}\"\n", epg_url);
     let channels = st.channels.read().await;
+    // Sort by quality (descending) so highest-quality variant is emitted first.
+    // Use raw title (with prefix) for ranking and base-name to keep
+    // different genre/country channels from merging (e.g. IT| SKY vs UK| SKY).
+    let mut sorted_indices: Vec<(usize, u8)> = channels.iter().enumerate()
+        .filter(|(_, ch)| filter.is_channel_allowed(st.profile_id, &ch.info.cmd, &ch.info.genre_id))
+        .map(|(i, ch)| (i, resolution_rank(&ch.info.title)))
+        .collect();
+    sorted_indices.sort_by_key(|(_, r)| -(*r as i32));
     let mut seen_bases: HashSet<String> = HashSet::new();
-    for ch in channels.iter() {
-        if !filter.is_channel_allowed(st.profile_id, &ch.info.cmd, &ch.info.genre_id) { continue; }
-        let title = filter.apply_rename(st.profile_id, &ch.info.title);
-        // Quality dedup: only emit the highest-quality entry per base channel
-        let base = base_name(&title).to_string();
+    for (idx, _rank) in sorted_indices {
+        let ch = &channels[idx];
+        let raw_title = &ch.info.title;
+        let display_title = filter.apply_rename(st.profile_id, &raw_title);
+        // Quality dedup: compute base from RAW title (with prefix) so
+        // channels from different genres don't merge
+        let base = base_name(raw_title);
         if seen_bases.contains(&base) { continue; }
         seen_bases.insert(base);
-        let logo = format!("/logo/{}", url_encode(&title));
-        let link = format!("{}://{}/{}", scheme, host, url_encode(&title));
+        let logo = format!("/logo/{}", url_encode(&display_title));
+        let link = format!("{}://{}/{}", scheme, host, url_encode(&display_title));
         let genre = filter.apply_genre_rename(st.profile_id, &ch.info.genre_id, &ch.info.genre);
         let tvg_id = &ch.info.cmd;
         output.push_str(&format!(
             "#EXTINF:-1 tvg-id=\"{}\" tvg-name=\"{}\" tvg-logo=\"{}\" group-title=\"{}\", {}\n{}\n",
-            tvg_id, title, logo, genre, title, link
+            tvg_id, display_title, logo, genre, display_title, link
         ));
     }
     drop(channels);
@@ -275,14 +311,18 @@ async fn channel_handler(
     let scheme = scheme_from_request(&req);
     let host = host_from_request(&req);
 
-    // Quality fallback: if the requested channel fails, try lower-quality variants.
-    // Build a queue of titles to try: the requested title first, then quality-chain fallbacks.
-    let base = base_name(&title).to_string();
+    // Quality fallback: use the RAW title (with prefix) for quality-chain lookup.
+    // The chain is built from raw titles; display titles (no prefix) won't match.
+    let raw_title = {
+        let channels = st.channels.read().await;
+        channels[idx].info.title.clone()
+    };
+    let base = base_name(&raw_title);
     let mut fallback_titles: Vec<String> = Vec::new();
-    fallback_titles.push(title.clone());
+    fallback_titles.push(raw_title.clone());
     if let Some(chain) = st.quality_chain.read().await.get(&base) {
         for alt in chain {
-            if *alt != title {
+            if *alt != raw_title {
                 fallback_titles.push(alt.clone());
             }
         }
