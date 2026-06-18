@@ -42,11 +42,18 @@ impl FilterStore {
         }
         let title = s.trim().to_string();
 
+        // Pattern 1: "PREFIX| Name" — most common (e.g. "IT| RAI 1")
         if let Some(pos) = title.find("| ") {
             let prefix = &title[..pos];
-            // Prefix must be short (2-30 chars) and not contain spaces
             if prefix.len() >= 2 && prefix.len() <= 30 && !prefix.contains(' ') {
                 return title[pos + 2..].to_string();
+            }
+        }
+        // Pattern 2: "PREFIX | Name" — space before pipe (e.g. "ASIA | 24/7")
+        if let Some(pos) = title.find(" | ") {
+            let prefix = &title[..pos];
+            if prefix.len() >= 2 && prefix.len() <= 30 && !prefix.contains(' ') {
+                return title[pos + 3..].to_string();
             }
         }
         title

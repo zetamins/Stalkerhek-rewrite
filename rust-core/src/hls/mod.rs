@@ -38,7 +38,17 @@ fn normalize_title(title: &str) -> String {
 // Quality ranking for resolution tags (appear as last word in channel titles).
 // Higher rank = better quality. Untagged channels get rank 1.
 fn resolution_rank(title: &str) -> u8 {
-    let last = title.rsplit(' ').next().unwrap_or("");
+    // Look at the last word, skipping trailing symbols.
+    // For "HD ◉", the last word is "◉" (non-alphanumeric → skip to "HD").
+    let words: Vec<&str> = title.rsplit(' ').collect();
+    let mut last = "";
+    for w in &words {
+        let cleaned = w.trim_end_matches(|c: char| !c.is_alphanumeric());
+        if !cleaned.is_empty() {
+            last = cleaned;
+            break;
+        }
+    }
     match last {
         "4K" | "UHD" | "4K+" | "⁸ᴷ" => 5,
         "HEVC" | "FHD" | "HDR" | "RAW" | "ᴿᴬᵂ" | "ʰᵉᵛᶜ" => 4,
@@ -54,7 +64,10 @@ fn base_name(title: &str) -> String {
     let words: Vec<&str> = title.rsplit(' ').collect();
     let mut strip = 0;
     for w in &words {
-        let rank = match *w {
+        let cleaned = w.trim_end_matches(|c: char| !c.is_alphanumeric());
+        // Skip purely non-alphanumeric words (trailing symbols like ◉)
+        if cleaned.is_empty() { strip += 1; continue; }
+        let rank = match cleaned {
             "4K" | "UHD" | "4K+" | "⁸ᴷ" => 5,
             "HEVC" | "FHD" | "HDR" | "RAW" | "ᴿᴬᵂ" | "ʰᵉᵛᶜ" => 4,
             "HD" | "ᴴᴰ" => 3,
