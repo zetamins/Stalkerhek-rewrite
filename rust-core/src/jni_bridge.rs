@@ -22,11 +22,15 @@ struct GlobalEngine {
 static ENGINE: OnceLock<GlobalEngine> = OnceLock::new();
 
 fn to_jstring(env: &mut JNIEnv, s: &str) -> jstring {
-    env.new_string(s).unwrap().into_raw()
+    env.new_string(s).unwrap_or_else(|_| env.new_string("{}").unwrap()).into_raw()
 }
 
 fn get_engine() -> &'static GlobalEngine {
     ENGINE.get().expect("Engine not initialized")
+}
+
+fn jstring_to_string(env: &mut JNIEnv, s: &JString) -> String {
+    env.get_string(s).map(|s| s.into()).unwrap_or_default()
 }
 
 // ─── nativeInit ────────────────────────────────────────────────────────
@@ -37,7 +41,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeInit
     _class: JClass<'local>,
     data_dir: JString<'local>,
 ) -> jstring {
-    let dir: String = env.get_string(&data_dir).unwrap().into();
+    let dir: String = jstring_to_string(env, &data_dir);
     let data_path = PathBuf::from(&dir);
 
     android_logger::init_once(
@@ -146,7 +150,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeStar
     _class: JClass<'local>,
     profile_json: JString<'local>,
 ) -> jstring {
-    let json_str: String = env.get_string(&profile_json).unwrap().into();
+    let json_str: String = jstring_to_string(env, &profile_json);
     let profile: ProfileConfig = match serde_json::from_str(&json_str) {
         Ok(p) => p,
         Err(e) => {
@@ -280,7 +284,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeGetC
     profile_id: jint,
     media_type: JString<'local>,
 ) -> jstring {
-    let type_str: String = env.get_string(&media_type).unwrap().into();
+    let type_str: String = jstring_to_string(env, &media_type);
     let engine = get_engine();
     let json = engine.runtime.block_on(async {
         let runners = engine.state.runners.read().await;
@@ -332,7 +336,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeGetC
     profile_id: jint,
     media_type: JString<'local>,
 ) -> jstring {
-    let type_str: String = env.get_string(&media_type).unwrap().into();
+    let type_str: String = jstring_to_string(env, &media_type);
     let engine = get_engine();
     let json = engine.runtime.block_on(async {
         let runners = engine.state.runners.read().await;
@@ -372,7 +376,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeCrea
     _class: JClass<'local>,
     profile_json: JString<'local>,
 ) -> jstring {
-    let json_str: String = env.get_string(&profile_json).unwrap().into();
+    let json_str: String = jstring_to_string(env, &profile_json);
     let profile: ProfileConfig = match serde_json::from_str(&json_str) {
         Ok(p) => p,
         Err(e) => {
@@ -443,7 +447,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeFilt
     _class: JClass<'local>,
     action_json: JString<'local>,
 ) -> jstring {
-    let json_str: String = env.get_string(&action_json).unwrap().into();
+    let json_str: String = jstring_to_string(env, &action_json);
     let req: Map<String, String> = match serde_json::from_str(&json_str) {
         Ok(m) => m,
         Err(_) => {
@@ -510,7 +514,7 @@ pub extern "system" fn Java_com_stalkerhek_tv_engine_RustEngineBridge_nativeSync
     _class: JClass<'local>,
     snapshot_json: JString<'local>,
 ) -> jstring {
-    let json_str: String = env.get_string(&snapshot_json).unwrap().into();
+    let json_str: String = jstring_to_string(env, &snapshot_json);
     let snapshot: std::collections::HashMap<i32, crate::api::SyncFilterState> =
         match serde_json::from_str(&json_str) {
             Ok(s) => s,
