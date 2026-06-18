@@ -25,8 +25,23 @@ impl FilterStore {
         }
     }
 
+    /// Automatically strip genre prefix from titles.
+    /// Portals embed prefixes like "IT| Rai 1" or "UK| BBC TWO HD".
+    /// This detects the `PREFIX| ` pattern and removes it transparently.
+    pub fn strip_auto_prefix(title: &str) -> String {
+        if let Some(pos) = title.find("| ") {
+            let prefix = &title[..pos];
+            // Prefix must be short (2-30 chars) and not contain spaces
+            // so we don't strip legitimate "|" usage in channel names
+            if prefix.len() >= 2 && prefix.len() <= 30 && !prefix.contains(' ') {
+                return title[pos + 2..].to_string();
+            }
+        }
+        title.to_string()
+    }
+
     pub fn apply_rename(&self, profile_id: i32, title: &str) -> String {
-        let mut t = title.to_string();
+        let mut t = Self::strip_auto_prefix(title);
         if let Some(prefixes) = self.rename_prefix.get(&profile_id) {
             for prefix in prefixes.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
                 if t.starts_with(prefix) {
