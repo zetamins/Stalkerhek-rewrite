@@ -5,6 +5,7 @@ pub mod filter;
 pub mod api;
 pub mod mag;
 pub mod dns;
+pub mod discover;
 
 #[cfg(feature = "android")]
 pub mod jni_bridge;
@@ -43,6 +44,10 @@ pub struct ProfileConfig {
     pub hls_enabled: bool,
     pub proxy_enabled: bool,
     pub proxy_rewrite: bool,
+    /// Alternative portal URLs to try if primary fails (auth error, 458, DNS failure).
+    /// Each entry should be a full Stalker portal URL like "http://iptvnow.nl/c/".
+    #[serde(default)]
+    pub fallback_portals: Vec<String>,
 }
 
 impl Default for ProfileConfig {
@@ -67,6 +72,7 @@ impl Default for ProfileConfig {
             hls_enabled: true,
             proxy_enabled: true,
             proxy_rewrite: true,
+            fallback_portals: Vec::new(),
         }
     }
 }

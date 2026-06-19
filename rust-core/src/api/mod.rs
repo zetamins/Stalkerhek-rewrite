@@ -82,6 +82,7 @@ pub fn build_router() -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
         .route("/api/v1/profile", post(create_profile))
+        .route("/api/v1/discover", post(discover_handler))
         .route("/api/v1/profile/:id", get(get_profile).delete(delete_profile))
         .route("/api/v1/profile/:id/start", post(start_profile))
         .route("/api/v1/profile/:id/stop", post(stop_profile))
@@ -128,6 +129,24 @@ struct CreateProfileRequest {
     device_id2: Option<String>,
     signature: Option<String>,
     watchdog_interval: Option<u32>,
+    fallback_portals: Option<Vec<String>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoverRequest {
+    portal_url: String,
+}
+
+async fn discover_handler(
+    Json(req): Json<DiscoverRequest>,
+) -> impl IntoResponse {
+    let result = crate::discover::discover_portals(&req.portal_url).await;
+    Json(serde_json::json!({
+        "bestPortal": result.best_portal,
+        "discovered": result.discovered,
+        "allPortals": result.all_portals,
+    }))
 }
 
 async fn create_profile(
@@ -161,6 +180,7 @@ async fn create_profile(
         hls_enabled: req.hls_enabled.unwrap_or(true),
         proxy_enabled: req.proxy_enabled.unwrap_or(true),
         proxy_rewrite: req.proxy_rewrite.unwrap_or(true),
+        fallback_portals: req.fallback_portals.unwrap_or_default(),
     };
     // Auto-detect local timezone if none provided
     let mut cfg = cfg;
@@ -246,10 +266,20 @@ pub async fn start_profile_by_id(
         }
     }
 
-    // Build portal client with European DNS resolution and authenticate
-    let portal_client = Arc::new(RwLock::new(
-        stalker::PortalClient::new(
-            profile.portal_url.clone(),
+    // Build list of portal URLs to try: primary first, then fallbacks
+    let mut portal_urls = vec![profile.portal_url.clone()];
+    for fb in &profile.fallback_portals {
+        if !fb.is_empty() && !portal_urls.contains(fb) {
+            portal_urls.push(fb.clone());
+        }
+    }
+
+    let mut portal_client_opt: Option<Arc<RwLock<stalker::PortalClient>>> = None;
+    let mut chosen_url = String::new();
+
+    for url in &portal_urls {
+        let client = stalker::PortalClient::new(
+            url.clone(),
             profile.mac.clone(),
             profile.username.clone(),
             profile.password.clone(),
@@ -260,27 +290,33 @@ pub async fn start_profile_by_id(
             profile.model.clone(),
             profile.timezone.clone(),
             profile.device_id_auth,
-        )
-    ));
-
-    // Resolve portal via European DNS to bypass geo-blocking
-    {
-        let mut client = portal_client.write().await;
-        client.resolve_eu_dns().await;
-    }
-
-    // Portal API cadence: realistic MAG254 boot-sequence inter-request delays.
-    // A real STB has processing gaps between API calls as it parses responses and updates state.
-    cadence_delay(150..400).await;
-
-    // Authenticate
-    {
-        let mut client = portal_client.write().await;
-        if let Err(e) = client.authenticate().await {
-            tracing::error!("Auth failed for profile {}: {}", id, e);
-            return Err(StatusCode::UNAUTHORIZED);
+        );
+        let pc = Arc::new(RwLock::new(client));
+        // Resolve DNS
+        pc.write().await.resolve_eu_dns().await;
+        cadence_delay(150..400).await;
+        // Authenticate
+        let auth_result = pc.write().await.authenticate().await;
+        match auth_result {
+            Ok(_) => {
+                chosen_url = url.clone();
+                portal_client_opt = Some(pc);
+                tracing::info!("Profile {}: authenticated via {}", id, url);
+                break;
+            }
+            Err(e) => {
+                tracing::warn!("Profile {}: auth failed for {} — {}", id, url, e);
+            }
         }
     }
+
+    let portal_client = match portal_client_opt {
+        Some(pc) => pc,
+        None => {
+            tracing::error!("Auth failed for profile {}: all portals exhausted", id);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    };
 
     cadence_delay(300..800).await;
 
