@@ -204,7 +204,8 @@ async fn proxy_handler(
             "get_ordered_list" if query.r#type.as_deref() == Some("itv") => {
                 // Serve from local cache with genre filter, dedup, suffix strip, pagination.
                 let genre_id = query.extra.get("genre").cloned().unwrap_or_default();
-                let page: usize = query.extra.get("p").and_then(|p| p.parse().ok()).unwrap_or(1);
+                // Stalker uses 0-based page index (p=0 = first page).
+                let page: usize = query.extra.get("p").and_then(|p| p.parse::<usize>().ok()).map(|p| p + 1).unwrap_or(1);
                 let per_page: usize = 14;
                 let filter = st.filter.read().await;
                 // Collect matching channels + pre-compute renamed/ranked data
