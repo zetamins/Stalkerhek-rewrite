@@ -278,7 +278,7 @@ impl PortalClient {
     pub fn new(
         base_url: String, mut mac: String, username: String, password: String,
         mut serial_number: String, mut device_id: String, mut device_id2: String,
-        signature: String, model: String, timezone: String,
+        mut signature: String, model: String, timezone: String,
         device_id_auth: bool,
     ) -> Self {
         mac = Self::repair_mac(&mac);
@@ -291,22 +291,20 @@ impl PortalClient {
         let seed = s.finish();
         let rev = 2000 + (seed % 200) as u32;
 
-        // Method 1: Identity Branching (The "Clone" Fix)
-        // Omnipotent Method 2: Dynamic Multiverse Rotation (B, C, D...)
-        let branch = match 0 {
-            _ if 0 == 0 => "B", // Base branch
-            _ => "X",
-        };
+        // Derive device identity from MAC using deterministic hashing
+        // (same algorithm as the Python community tools).
+        // Empty config fields get auto-generated; non-empty ones are preserved.
+        let (sn_gen, d1_gen, d2_gen, sig_gen) = Self::derive_device_ids(&mac);
+        if serial_number.is_empty() { serial_number = sn_gen; }
+        if device_id.is_empty() { device_id = d1_gen; }
+        if device_id2.is_empty() { device_id2 = d2_gen; }
+        if signature.is_empty() { signature = sig_gen; }
 
-        if !serial_number.is_empty() {
-            serial_number = format!("{}{}", serial_number, branch);
-        }
-        if !device_id.is_empty() {
-            device_id = format!("{}{}", device_id, branch);
-        }
-        if !device_id2.is_empty() {
-            device_id2 = format!("{}{}", device_id2, branch);
-        }
+        // Identity Branching — append a branch suffix for incarnation rotation
+        let branch = "B";
+        serial_number = format!("{}{}", serial_number, branch);
+        device_id = format!("{}{}", device_id, branch);
+        device_id2 = format!("{}{}", device_id2, branch);
 
         let fp = model_fingerprint(&model);
         let ua = format!(
@@ -329,6 +327,20 @@ impl PortalClient {
             etags: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             hls_cache: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Derive STB device credentials from a MAC address.
+    /// Uses MD5/SHA256 (same algorithm as the Python community tools).
+    /// Returns (serial_number, device_id, device_id2, signature).
+    fn derive_device_ids(mac: &str) -> (String, String, String, String) {
+        use sha2::Digest;
+        let clean: String = mac.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let sn_full = format!("{:x}", md5::compute(clean.as_bytes())).to_uppercase();
+        let sn_short = &sn_full[..13.min(sn_full.len())];
+        let dev1 = format!("{:x}", sha2::Sha256::digest(clean.as_bytes())).to_uppercase();
+        let dev2 = format!("{:x}", sha2::Sha256::digest(sn_short.as_bytes())).to_uppercase();
+        let sig = format!("{:x}", sha2::Sha256::digest(format!("{}{}", sn_short, clean).as_bytes())).to_uppercase();
+        (sn_full, dev1, dev2, sig)
     }
 
     /// Rebuild the internal client with European DNS resolution.
