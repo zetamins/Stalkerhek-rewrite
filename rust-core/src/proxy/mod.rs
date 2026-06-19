@@ -240,10 +240,13 @@ async fn proxy_handler(
                 let page_items: Vec<serde_json::Value> = items[start..end].iter().map(|(ch, name, _)| {
                     serde_json::json!({
                         "name": crate::hls::base_name(name),
+                        "number": "0",
                         "cmd": ch.cmd,
                         "logo": ch.logo,
                         "tv_genre_id": ch.genre_id,
-                        "cmds": [{"id": ch.cmd_id, "ch_id": ch.cmd_ch_id}]
+                        "use_http_tmp_link": "1",
+                        "use_load_balancing": "1",
+                        "cmds": [{"id": ch.cmd_id, "ch_id": ch.cmd_ch_id, "url": ch.cmd, "use_http_tmp_link": "1"}]
                     })
                 }).collect();
                 return Response::builder()
@@ -268,10 +271,13 @@ async fn proxy_handler(
                         let renamed = filter.apply_rename(st.profile_id, &ch.title);
                         serde_json::json!({
                             "name": renamed,
+                            "number": "0",
                             "cmd": ch.cmd,
                             "logo": ch.logo,
                             "tv_genre_id": ch.genre_id,
-                            "cmds": [{"id": ch.cmd_id, "ch_id": ch.cmd_ch_id}]
+                            "use_http_tmp_link": "1",
+                            "use_load_balancing": "1",
+                            "cmds": [{"id": ch.cmd_id, "ch_id": ch.cmd_ch_id, "url": ch.cmd, "use_http_tmp_link": "1"}]
                         })
                     })
                     .collect();
