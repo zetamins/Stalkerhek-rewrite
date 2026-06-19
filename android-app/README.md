@@ -62,6 +62,10 @@ Once running, open `http://<device-ip>:4400/dashboard` in any browser:
 | `/api/v1/profiles` | Profile list (JSON) |
 | `/api/profile_status` | Live profile statuses (JSON) |
 
+## CI/CD
+
+Automated APK builds on every push to `main` and `test` branches. Debug builds are published as beta pre-releases.
+
 ## License
 
 MIT
