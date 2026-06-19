@@ -760,6 +760,7 @@ fn rewrite_channel_list_response(
         ("get_ordered_list", "itv" | "vod" | "series") => {
             // Rename, quality-dedup, strip suffix, drop separators.
             // Update total_items so page count stays accurate.
+            let new_total;
             if let Some(data) = json["js"]["data"].as_array_mut() {
                 for item in data.iter_mut() {
                     if let Some(name) = item["name"].as_str() {
@@ -771,27 +772,26 @@ fn rewrite_channel_list_response(
                 data.retain(|item| {
                     !item["name"].as_str().map_or(false, |n| n.starts_with('#'))
                 });
-                // Sort by quality (descending) → highest kept on dedup
                 data.sort_by_key(|item| {
                     let name = item["name"].as_str().unwrap_or("");
                     -(crate::hls::resolution_rank(name) as i32)
                 });
-                // Dedup by base name
                 let mut seen = std::collections::HashSet::new();
                 data.retain(|item| {
                     let name = item["name"].as_str().unwrap_or("");
                     seen.insert(crate::hls::base_name(name))
                 });
-                // Strip resolution suffix from display names
                 for item in data.iter_mut() {
                     if let Some(name) = item["name"].as_str() {
                         item["name"] = serde_json::Value::String(crate::hls::base_name(name));
                     }
                 }
-                // Update total_items to match deduped count
-                if let Some(total) = json["js"].get_mut("total_items") {
-                    *total = serde_json::Value::Number(data.len().into());
-                }
+                new_total = data.len();
+            } else {
+                new_total = 0;
+            }
+            if let Some(total) = json["js"].get_mut("total_items") {
+                *total = serde_json::Value::Number(new_total.into());
             }
             Some(serde_json::to_vec(&json).ok()?)
         }
