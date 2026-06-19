@@ -752,11 +752,48 @@ impl PortalClient {
             .send().await
         {
             Ok(resp) => {
-                let status = resp.status().as_u16();
+                let mut status = resp.status().as_u16();
                 tracing::info!("[HLS] portal returned HTTP {}", status);
+                // Per-MAC concurrent stream limit — STB is watching.
+                // Brief wait + single retry; STB may release the slot.
                 if status == 458 || status == 444 {
-                    // Per-MAC streaming limit — propagate to caller for reborn
-                    return Err(format!("Portal HTTP {} (per-MAC limit)", status).into());
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    if let Ok(retry) = portal_client.get(&m3u8_url)
+                        .header("User-Agent", "MAG254")
+                        .send().await
+                    {
+                        status = retry.status().as_u16();
+                        tracing::info!("[HLS] portal 458 retry → HTTP {}", status);
+                        if status == 302 {
+                            // Process the retry response below as if first attempt
+                            if let Some(loc) = retry.headers().get(reqwest::header::LOCATION) {
+                                let redirect_url = loc.to_str().unwrap_or("").to_string();
+                                let streamer_base = match url::Url::parse(&redirect_url) {
+                                    Ok(u) => format!("{}://{}", u.scheme(), u.host_str().unwrap_or("")),
+                                    Err(_) => redirect_url.clone(),
+                                };
+                                let red_client = reqwest::Client::builder()
+                                    .redirect(reqwest::redirect::Policy::none())
+                                    .timeout(std::time::Duration::from_secs(10))
+                                    .build()?;
+                                if let Ok(red_resp) = red_client.get(&redirect_url)
+                                    .header("User-Agent", "MAG254")
+                                    .send().await
+                                {
+                                    let playlist_body = red_resp.bytes().await?.to_vec();
+                                    if !playlist_body.is_empty() && playlist_body.starts_with(b"#EXTM3U") {
+                                        let rewritten = Self::rewrite_hls_segments(&playlist_body, &streamer_base);
+                                        let mut headers = reqwest::header::HeaderMap::new();
+                                        headers.insert(reqwest::header::CONTENT_TYPE,
+                                            reqwest::header::HeaderValue::from_static("application/vnd.apple.mpegurl"));
+                                        tracing::info!("[HLS] portal 458 retry OK: {} bytes", rewritten.len());
+                                        return Ok((rewritten.into_bytes(), headers));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return Err(format!("Portal HTTP {} (per-MAC limit, retry failed)", status).into());
                 }
                 if status == 302 {
                     if let Some(loc) = resp.headers().get(reqwest::header::LOCATION) {
