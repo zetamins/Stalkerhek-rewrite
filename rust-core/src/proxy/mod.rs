@@ -229,16 +229,24 @@ async fn proxy_handler(
                     if seen.insert(base.clone()) {
                         let ch_id = extract_stream_id(&ch.cmd);
                         let num = deduped.len() + 1;
+                        // Route playback through HLS server
+                        let host = headers.get("host")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|h| h.split(':').next())
+                            .unwrap_or("localhost");
+                        let hls_url = format!("ffmpeg http://{}:{}/{}", host,
+                            st.hls_bind.split(':').last().unwrap_or("4600"),
+                            url_encode(&ch.title));
                         deduped.push(serde_json::json!({
                             "id": ch_id,
                             "name": base,
                             "number": num.to_string(),
-                            "cmd": ch.cmd,
+                            "cmd": hls_url,
                             "logo": ch.logo,
                             "tv_genre_id": ch.genre_id,
                             "use_http_tmp_link": "1",
                             "use_load_balancing": "1",
-                            "cmds": [{"id": ch_id, "ch_id": ch.cmd_ch_id, "url": ch.cmd, "use_http_tmp_link": "1"}]
+                            "cmds": [{"id": ch_id, "ch_id": ch.cmd_ch_id, "url": hls_url, "use_http_tmp_link": "1"}]
                         }));
                     }
                 }
