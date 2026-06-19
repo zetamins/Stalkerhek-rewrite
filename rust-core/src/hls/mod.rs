@@ -183,7 +183,7 @@ async fn logo_handler(
     let eur_ips = dns::resolve_european(&host).await;
 
     let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(90))
         .redirect(reqwest::redirect::Policy::none());
     
     builder = stalker::PortalClient::configure_stealth_client(builder);

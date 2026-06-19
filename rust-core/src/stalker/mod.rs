@@ -767,7 +767,7 @@ impl PortalClient {
         // Try portal first — works when Cloudflare allows
         let portal_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
         match portal_client.get(&m3u8_url)
@@ -799,7 +799,7 @@ impl PortalClient {
                                 };
                                 let red_client = reqwest::Client::builder()
                                     .redirect(reqwest::redirect::Policy::none())
-                                    .timeout(std::time::Duration::from_secs(10))
+                                    .timeout(std::time::Duration::from_secs(30))
                                     .build()?;
                                 if let Ok(red_resp) = red_client.get(&redirect_url)
                                     .header("User-Agent", "MAG254")
@@ -829,7 +829,7 @@ impl PortalClient {
                         };
                         let red_client = reqwest::Client::builder()
                             .redirect(reqwest::redirect::Policy::none())
-                            .timeout(std::time::Duration::from_secs(10))
+                            .timeout(std::time::Duration::from_secs(30))
                             .build()?;
                         let red_resp = red_client.get(&redirect_url)
                             .header("User-Agent", "MAG254")
@@ -861,7 +861,7 @@ impl PortalClient {
         for &ip in &streamer_ips {
             let pinned = match reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
-                .timeout(std::time::Duration::from_secs(15))
+                .timeout(std::time::Duration::from_secs(45))
                 .resolve("tres.4vps.info", std::net::SocketAddr::new(ip, 80))
                 .build() { Ok(c) => c, Err(_) => continue };
 
@@ -879,7 +879,7 @@ impl PortalClient {
                     };
                     let rc = reqwest::Client::builder()
                         .redirect(reqwest::redirect::Policy::none())
-                        .timeout(std::time::Duration::from_secs(10)).build()?;
+                        .timeout(std::time::Duration::from_secs(30)).build()?;
                     if let Ok(rr) = rc.get(&red_url).header("User-Agent", "MAG254").send().await {
                         let body = rr.bytes().await?.to_vec();
                         if !body.is_empty() && body.starts_with(b"#EXTM3U") {
