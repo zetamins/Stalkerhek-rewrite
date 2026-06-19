@@ -239,8 +239,9 @@ async fn proxy_handler(
                 let end = (start + per_page).min(total);
                 let page_items: Vec<serde_json::Value> = items[start..end].iter().enumerate().map(|(idx, (ch, name, _))| {
                     let num = start + idx + 1;
+                    let ch_id = extract_stream_id(&ch.cmd);
                     serde_json::json!({
-                        "id": ch.cmd_id,
+                        "id": ch_id,
                         "name": crate::hls::base_name(name),
                         "number": num.to_string(),
                         "cmd": ch.cmd,
@@ -248,7 +249,7 @@ async fn proxy_handler(
                         "tv_genre_id": ch.genre_id,
                         "use_http_tmp_link": "1",
                         "use_load_balancing": "1",
-                        "cmds": [{"id": ch.cmd_id, "ch_id": ch.cmd_ch_id, "url": ch.cmd, "use_http_tmp_link": "1"}]
+                        "cmds": [{"id": ch_id, "ch_id": ch.cmd_ch_id, "url": ch.cmd, "use_http_tmp_link": "1"}]
                     })
                 }).collect();
                 return Response::builder()
@@ -271,9 +272,10 @@ async fn proxy_handler(
                     .filter(|ch| filter.is_channel_allowed(st.profile_id, &ch.cmd, &ch.genre_id))
                     .enumerate()
                     .map(|(i, ch)| {
+                        let ch_id = extract_stream_id(&ch.cmd);
                         let renamed = filter.apply_rename(st.profile_id, &ch.title);
                         serde_json::json!({
-                            "id": ch.cmd_id,
+                            "id": ch_id,
                             "name": renamed,
                             "number": (i + 1).to_string(),
                             "cmd": ch.cmd,
@@ -281,7 +283,7 @@ async fn proxy_handler(
                             "tv_genre_id": ch.genre_id,
                             "use_http_tmp_link": "1",
                             "use_load_balancing": "1",
-                            "cmds": [{"id": ch.cmd_id, "ch_id": ch.cmd_ch_id, "url": ch.cmd, "use_http_tmp_link": "1"}]
+                            "cmds": [{"id": ch_id, "ch_id": ch.cmd_ch_id, "url": ch.cmd, "use_http_tmp_link": "1"}]
                         })
                     })
                     .collect();
