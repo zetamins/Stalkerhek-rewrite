@@ -18,7 +18,7 @@ use crate::filter::FilterStore;
 use crate::stalker;
 
 // Normalize whitespace: collapse multiple spaces to single, trim.
-fn normalize_title(title: &str) -> String {
+pub(crate) fn normalize_title(title: &str) -> String {
     let mut s = String::with_capacity(title.len());
     let mut last_was_space = false;
     for c in title.chars() {
@@ -37,7 +37,7 @@ fn normalize_title(title: &str) -> String {
 
 // Quality ranking for resolution tags (appear as last word in channel titles).
 // Higher rank = better quality. Untagged channels get rank 1.
-fn resolution_rank(title: &str) -> u8 {
+pub(crate) fn resolution_rank(title: &str) -> u8 {
     // Look at the last word, skipping trailing symbols.
     // For "HD ◉", the last word is "◉" (non-alphanumeric → skip to "HD").
     let words: Vec<&str> = title.rsplit(' ').collect();
@@ -60,7 +60,7 @@ fn resolution_rank(title: &str) -> u8 {
 
 /// Strip resolution tags to get the base channel name.
 /// Handles compound tags like "HEVC FHD" or "HEVC HD" — strips both words.
-fn base_name(title: &str) -> String {
+pub(crate) fn base_name(title: &str) -> String {
     let words: Vec<&str> = title.rsplit(' ').collect();
     let mut strip = 0;
     for w in &words {

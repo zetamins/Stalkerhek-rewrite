@@ -202,17 +202,15 @@ async fn proxy_handler(
                     .unwrap();
             }
             "get_all_channels" if query.r#type.as_deref() == Some("itv") => {
-                // Serve from local cache (channels fetched at profile startup) to avoid
-                // relying on the portal's upstream get_all_channels endpoint which often
-                // returns 520. The STB JS uses this to populate stb.player.channels.
-                // Apply filter so stb.player.channels matches what the portal should show.
+                // Serve from local cache with rename, # filtering, and quality dedup.
                 let filter = st.filter.read().await;
                 let channels_guard = st.channels.read().await;
-                let data: Vec<serde_json::Value> = channels_guard.values()
+                let mut data: Vec<serde_json::Value> = channels_guard.values()
                     .filter(|ch| filter.is_channel_allowed(st.profile_id, &ch.cmd, &ch.genre_id))
                     .map(|ch| {
+                        let renamed = filter.apply_rename(st.profile_id, &ch.title);
                         serde_json::json!({
-                            "name": ch.title,
+                            "name": renamed,
                             "cmd": ch.cmd,
                             "logo": ch.logo,
                             "tv_genre_id": ch.genre_id,
@@ -221,6 +219,18 @@ async fn proxy_handler(
                     })
                     .collect();
                 drop(filter);
+                // Drop # separators + quality dedup (keep highest quality)
+                data.sort_by_key(|item| {
+                    let name = item["name"].as_str().unwrap_or("");
+                    -(crate::hls::resolution_rank(name) as i32)
+                });
+                let mut seen = std::collections::HashSet::new();
+                data.retain(|item| {
+                    let name = item["name"].as_str().unwrap_or("");
+                    if name.starts_with('#') { return false; }
+                    let base = crate::hls::base_name(name);
+                    seen.insert(base)
+                });
                 return Response::builder()
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&serde_json::json!({
@@ -742,7 +752,7 @@ fn rewrite_channel_list_response(
         ("get_ordered_list", "itv" | "vod" | "series") => {
             // Don't filter channels from the list -- the genre list hides disabled genres
             // so users navigate to specific genres for filtered results, and create_link
-            // blocks playback for disabled channels. Just apply renames and drop separators.
+            // Apply renames, drop separators, and dedup by quality (keep highest rank).
             if let Some(data) = json["js"]["data"].as_array_mut() {
                 for item in data.iter_mut() {
                     if let Some(name) = item["name"].as_str() {
@@ -750,8 +760,19 @@ fn rewrite_channel_list_response(
                         item["name"] = serde_json::Value::String(renamed);
                     }
                 }
-                // Drop separator channels (names starting with # like "##### ITALY #####")
-                data.retain(|item| !item["name"].as_str().map_or(false, |n| n.starts_with('#')));
+                // Sort by quality (descending) so highest quality retained on dedup
+                data.sort_by_key(|item| {
+                    let name = item["name"].as_str().unwrap_or("");
+                    -(crate::hls::resolution_rank(name) as i32)
+                });
+                // Drop # separators + quality dedup
+                let mut seen = std::collections::HashSet::new();
+                data.retain(|item| {
+                    let name = item["name"].as_str().unwrap_or("");
+                    if name.starts_with('#') { return false; }
+                    let base = crate::hls::base_name(name);
+                    seen.insert(base)
+                });
             }
             Some(serde_json::to_vec(&json).ok()?)
         }
@@ -764,17 +785,27 @@ fn rewrite_channel_list_response(
             *data = std::mem::take(data).into_iter().filter(|item| {
                 let cmd = json_str(&item["cmd"], &mut cmd_buf);
                 let genre_id = json_str(&item["tv_genre_id"], &mut genre_buf);
-                // Drop separator channels
                 let name = json_str(&item["name"], &mut name_buf);
                 if name.starts_with('#') { return false; }
                 filter.is_channel_allowed(profile_id, cmd, genre_id)
             }).collect();
+            // Rename first, then sort by quality + dedup
             for item in data.iter_mut() {
                 if let Some(name) = item["name"].as_str() {
                     let renamed = filter.apply_rename(profile_id, name);
                     item["name"] = serde_json::Value::String(renamed);
                 }
             }
+            data.sort_by_key(|item| {
+                let name = item["name"].as_str().unwrap_or("");
+                -(crate::hls::resolution_rank(name) as i32)
+            });
+            let mut seen = std::collections::HashSet::new();
+            data.retain(|item| {
+                let name = item["name"].as_str().unwrap_or("");
+                let base = crate::hls::base_name(name);
+                seen.insert(base)
+            });
             Some(serde_json::to_vec(&json).ok()?)
         }
         // Filter disabled genres from genre/category lists shown in STB
