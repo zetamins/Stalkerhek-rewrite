@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
 use crate::api;
+use crate::discover;
 use crate::filter::FilterStore;
 use crate::{AppState, ProfileConfig};
 
@@ -389,16 +390,63 @@ pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeCreat
     };
 
     let engine = get_engine();
-    engine.runtime.block_on(async {
-        let mut profiles = engine.state.profiles.write().await;
-        // Upsert
-        if let Some(pos) = profiles.iter().position(|p| p.id == profile.id) {
-            profiles[pos] = profile.clone();
-        } else {
-            profiles.push(profile.clone());
-        }
-        api::save_profiles(&profiles, &engine.data_dir);
-    });
+    let (profiles_ref, runners_ref, data_dir, profile_id, portal_url, has_fallbacks) =
+        engine.runtime.block_on(async {
+            let mut profiles = engine.state.profiles.write().await;
+            // Upsert
+            if let Some(pos) = profiles.iter().position(|p| p.id == profile.id) {
+                profiles[pos] = profile.clone();
+            } else {
+                profiles.push(profile.clone());
+            }
+            api::save_profiles(&profiles, &engine.data_dir);
+            (
+                engine.state.profiles.clone(),
+                engine.state.runners.clone(),
+                engine.data_dir.clone(),
+                profile.id,
+                profile.portal_url.clone(),
+                profile.fallback_portals.is_empty(),
+            )
+        });
+
+    // Spawn background discovery (same as HTTP create_profile path)
+    if has_fallbacks {
+        engine.runtime.spawn(async move {
+            let discover = crate::discover::discover_portals(&portal_url).await;
+            if discover.discovered {
+                tracing::info!(
+                    "[discover JNI] profile {}: found {} portals, best: {}",
+                    profile_id,
+                    discover.all_portals.len(),
+                    discover.best_portal
+                );
+                let mut profiles = profiles_ref.write().await;
+                if let Some(p) = profiles.iter_mut().find(|p| p.id == profile_id) {
+                    p.fallback_portals = discover.all_portals;
+                    p.portal_url = discover.best_portal;
+                    p.discovery_done = true;
+                    api::save_profiles(&profiles, &data_dir);
+                }
+                let runners = runners_ref.read().await;
+                if let Some(r) = runners.iter().find(|r| r.config.id == profile_id) {
+                    let mut status = r.status.write().await;
+                    status.discovery_done = true;
+                }
+            } else {
+                let mut profiles = profiles_ref.write().await;
+                if let Some(p) = profiles.iter_mut().find(|p| p.id == profile_id) {
+                    p.discovery_done = true;
+                    api::save_profiles(&profiles, &data_dir);
+                }
+                let runners = runners_ref.read().await;
+                if let Some(r) = runners.iter().find(|r| r.config.id == profile_id) {
+                    let mut status = r.status.write().await;
+                    status.discovery_done = true;
+                }
+            }
+        });
+    }
 
     to_jstring(&mut env, &serde_json::to_string(&profile).unwrap_or_default())
 }
