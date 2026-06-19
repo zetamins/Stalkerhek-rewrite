@@ -750,9 +750,9 @@ fn rewrite_channel_list_response(
 
     match (action, media_type) {
         ("get_ordered_list", "itv" | "vod" | "series") => {
-            // Don't filter channels from the list -- the genre list hides disabled genres
-            // so users navigate to specific genres for filtered results, and create_link
-            // Apply renames, drop separators, and dedup by quality (keep highest rank).
+            // Only rename and drop separators — no dedup here.
+            // The STB paginates by genre and needs the original channel count
+            // for page calculations. Dedup is done in get_all_channels + HLS.
             if let Some(data) = json["js"]["data"].as_array_mut() {
                 for item in data.iter_mut() {
                     if let Some(name) = item["name"].as_str() {
@@ -760,18 +760,10 @@ fn rewrite_channel_list_response(
                         item["name"] = serde_json::Value::String(renamed);
                     }
                 }
-                // Sort by quality (descending) so highest quality retained on dedup
-                data.sort_by_key(|item| {
-                    let name = item["name"].as_str().unwrap_or("");
-                    -(crate::hls::resolution_rank(name) as i32)
-                });
-                // Drop # separators + quality dedup
-                let mut seen = std::collections::HashSet::new();
+                // Drop # separators only
                 data.retain(|item| {
                     let name = item["name"].as_str().unwrap_or("");
-                    if name.starts_with('#') { return false; }
-                    let base = crate::hls::base_name(name);
-                    seen.insert(base)
+                    !name.starts_with('#')
                 });
             }
             Some(serde_json::to_vec(&json).ok()?)
