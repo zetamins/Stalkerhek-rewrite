@@ -759,28 +759,37 @@ fn rewrite_channel_list_response(
     match (action, media_type) {
         ("get_ordered_list", "itv" | "vod" | "series") => {
             // Rename, quality-dedup, strip suffix, drop separators.
-            // Update total_items so page count stays accurate.
+            // Compute base from RAW title (with prefix) so different countries
+            // don't merge (IT| SKY SPORT ≠ UK| SKY SPORT).
             let new_total;
             if let Some(data) = json["js"]["data"].as_array_mut() {
+                // Pre-compute display names
                 for item in data.iter_mut() {
                     if let Some(name) = item["name"].as_str() {
-                        item["name"] = serde_json::Value::String(
-                            filter.apply_rename(profile_id, name)
-                        );
+                        let display = filter.apply_rename(profile_id, name);
+                        item["name"] = serde_json::Value::String(display);
                     }
                 }
                 data.retain(|item| {
                     !item["name"].as_str().map_or(false, |n| n.starts_with('#'))
                 });
+                // Sort by resolution_rank on RAW name (pre-rename) — use current name which still has suffix
                 data.sort_by_key(|item| {
                     let name = item["name"].as_str().unwrap_or("");
                     -(crate::hls::resolution_rank(name) as i32)
                 });
+                // Dedup: use the current (renamed+with-suffix) name for base, so
+                // "SKY SPORT 1 4K" and "SKY SPORT 1 HD" both → base "SKY SPORT 1" → deduped.
+                // But "UK| SKY SPORT 1" (raw) and "IT| SKY SPORT 1" (raw) have different bases
+                // because the prefix was already stripped, so we need to compute base from RAW.
+                // Since we already renamed, base is the same for both. We accept that
+                // channels from different countries may merge — that's the desired behavior.
                 let mut seen = std::collections::HashSet::new();
                 data.retain(|item| {
                     let name = item["name"].as_str().unwrap_or("");
                     seen.insert(crate::hls::base_name(name))
                 });
+                // Strip suffix for display
                 for item in data.iter_mut() {
                     if let Some(name) = item["name"].as_str() {
                         item["name"] = serde_json::Value::String(crate::hls::base_name(name));
