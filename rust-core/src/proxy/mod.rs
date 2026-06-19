@@ -253,7 +253,7 @@ async fn proxy_handler(
                         "js": {
                             "total_items": total,
                             "max_page_items": per_page,
-                            "cur_page": p,
+                            "cur_page": p + 1,
                             "data": page_items
                         }
                     })).unwrap()))
