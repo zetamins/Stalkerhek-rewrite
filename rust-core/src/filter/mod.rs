@@ -83,12 +83,11 @@ impl FilterStore {
     /// Apply genre rename for a given genre_id, falling back to original name.
     /// Auto-strips the genre prefix (e.g. "IT| Sports" → "Sports") from the result.
     pub fn apply_genre_rename(&self, profile_id: i32, genre_id: &str, original_name: &str) -> String {
-        let name = self.genre_renames.get(&profile_id)
+        self.genre_renames.get(&profile_id)
             .and_then(|m| m.get(genre_id))
             .filter(|n| !n.is_empty())
             .cloned()
-            .unwrap_or_else(|| original_name.to_string());
-        Self::strip_auto_prefix(&name)
+            .unwrap_or_else(|| original_name.to_string())
     }
 
     pub fn is_genre_disabled(&self, profile_id: i32, genre_id: &str) -> bool {

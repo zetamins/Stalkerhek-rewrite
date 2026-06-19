@@ -632,10 +632,7 @@ impl PortalClient {
         #[derive(Deserialize)]
         struct GenreResp { js: Vec<GenreItem> }
         let parsed: GenreResp = serde_json::from_str(&text)?;
-        Ok(parsed.js.into_iter().map(|g| {
-            let title = crate::filter::FilterStore::strip_auto_prefix(&g.title);
-            (g.id, title)
-        }).collect())
+        Ok(parsed.js.into_iter().map(|g| (g.id, g.title)).collect())
     }
 
     pub async fn get_vod_categories(&self) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
@@ -660,10 +657,6 @@ impl PortalClient {
         let parsed: CatResp = serde_json::from_str(&text)?;
         Ok(parsed.js.into_iter().map(|mut v| {
             if let Some(obj) = v.as_object_mut() {
-                if let Some(title) = obj.get("title").and_then(|t| t.as_str()) {
-                    let stripped = crate::filter::FilterStore::strip_auto_prefix(title);
-                    obj.insert("title".to_string(), serde_json::Value::String(stripped));
-                }
                 // Drop separator categories (titles starting with #)
                 if let Some(title) = obj.get("title").and_then(|t| t.as_str()) {
                     if title.starts_with('#') {
