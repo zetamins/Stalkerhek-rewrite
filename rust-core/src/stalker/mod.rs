@@ -18,9 +18,7 @@ pub struct WatchdogClient {
 impl WatchdogClient {
     fn api_url(&self) -> String {
         let parsed = url::Url::parse(&self.base_url).ok();
-        let scheme = parsed.as_ref().and_then(|u| {
-            if u.scheme() == "http" { Some("https") } else { Some(u.scheme()) }
-        }).unwrap_or("https");
+        let scheme = parsed.as_ref().and_then(|u| Some(u.scheme())).unwrap_or("http");
         let host = parsed.as_ref().and_then(|u| u.host_str()).unwrap_or("");
         format!("{}://{}/portal.php", scheme, host)
     }
@@ -351,11 +349,7 @@ impl PortalClient {
             Err(_) => return,
         };
         let host = parsed.host_str().unwrap_or("").to_string();
-        // api_url() forces HTTPS -- use 443 unless explicit non-standard port
-        let port = match parsed.port() {
-            Some(80) | None => 443,
-            Some(p) => p,
-        };
+        let port = parsed.port_or_known_default().unwrap_or(80);
         let ips = dns::resolve_european(&host).await;
 
         let fp = model_fingerprint(&self.model);
@@ -420,9 +414,7 @@ impl PortalClient {
     /// Build the API endpoint URL: https://{host}/portal.php
     fn api_url(&self) -> String {
         let parsed = url::Url::parse(&self.base_url).ok();
-        let scheme = parsed.as_ref().and_then(|u| {
-            if u.scheme() == "http" { Some("https") } else { Some(u.scheme()) }
-        }).unwrap_or("https");
+        let scheme = parsed.as_ref().and_then(|u| Some(u.scheme())).unwrap_or("http");
         let host = parsed.as_ref().and_then(|u| u.host_str()).unwrap_or("");
         format!("{}://{}/portal.php", scheme, host)
     }
@@ -752,10 +744,11 @@ impl PortalClient {
         let ts_url = self.create_link(cmd).await?;
         // Portal approach: HTTPS + m3u8 + bare client. This is what worked
         // when Cloudflare isn't rate-limiting (proven at 17:23 today).
-        let m3u8_url = ts_url
-            .replacen("http://", "https://", 1)
-            .replace(":80/", "/")
-            .replace("extension=ts", "extension=m3u8");
+        let mut m3u8_url = ts_url.replacen("extension=ts", "extension=m3u8", 1);
+        // Only upgrade to HTTPS if portal uses HTTPS
+        if self.base_url.starts_with("https") {
+            m3u8_url = m3u8_url.replacen("http://", "https://", 1).replace(":80/", "/");
+        }
 
         // Try portal first — works when Cloudflare allows
         let portal_client = reqwest::Client::builder()
