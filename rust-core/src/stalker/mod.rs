@@ -26,9 +26,20 @@ impl WatchdogClient {
     }
 
     pub async fn watchdog_update(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.send_watchdog(1).await
+    }
+
+    /// Shadow Ghost: send watchdog with cur_play_type=0 to release the
+    /// per-MAC stream slot. The portal marks this MAC as "not playing",
+    /// allowing a new stream to start. Used before retrying after 458.
+    pub async fn release_stream_slot(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.send_watchdog(0).await
+    }
+
+    async fn send_watchdog(&self, play_type: u8) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
-            "{}?action=get_events&event_active_id=0&init=0&type=watchdog&cur_play_type=1&JsHttpRequest=1-xml",
-            self.api_url()
+            "{}?action=get_events&event_active_id=0&init=0&type=watchdog&cur_play_type={}&JsHttpRequest=1-xml",
+            self.api_url(), play_type
         );
         let params = [
             ("mac", self.mac.as_str()),
@@ -755,9 +766,11 @@ impl PortalClient {
                 let mut status = resp.status().as_u16();
                 tracing::info!("[HLS] portal returned HTTP {}", status);
                 // Per-MAC concurrent stream limit — STB is watching.
-                // Brief wait + single retry; STB may release the slot.
+                // Send Shadow Ghost watchdog (cur_play_type=0) to kill STB's stream slot,
+                // then retry with the slot freed.
                 if status == 458 || status == 444 {
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let _ = self.clone_for_watchdog().release_stream_slot().await;
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     if let Ok(retry) = portal_client.get(&m3u8_url)
                         .header("User-Agent", "MAG254")
                         .send().await
