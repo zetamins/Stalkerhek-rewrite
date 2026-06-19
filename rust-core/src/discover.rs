@@ -15,8 +15,8 @@ pub struct DiscoverResult {
 const KNOWN_SUBNETS: &[&str] = &["103.176.90", "185.245.0"];
 
 pub async fn discover_portals(portal_url: &str) -> DiscoverResult {
-    // Step 1: Resolve origin IP, do reverse-IP lookup
     let mut domain_portals: Vec<(String, f64)> = Vec::new();
+    let mut ip_fallback: Vec<(String, f64)> = Vec::new();
 
     if let Ok(parsed) = url::Url::parse(portal_url) {
         if let Some(host) = parsed.host_str() {
@@ -33,70 +33,36 @@ pub async fn discover_portals(portal_url: &str) -> DiscoverResult {
 
                     if is_cf {
                         tracing::info!("[discover] {} is Cloudflare — scanning known subnets", host);
-                        for subnet in KNOWN_SUBNETS {
-                            let mut ip_portals = Vec::new();
-                            scan_subnet(subnet, &mut ip_portals).await;
-                            // Reverse-IP lookup on each found IP to get domain names
-                            for (ip_url, _latency) in &ip_portals {
-                                let ip_str = ip_url
-                                    .trim_start_matches("http://")
-                                    .trim_end_matches(":80");
-                                let domains = reverse_ip_lookup(ip_str).await;
-                                if domains.is_empty() {
-                                    domain_portals.push((ip_url.clone(), 0.0));
-                                } else {
-                                    test_domains(&domains, &mut domain_portals).await;
-                                }
-                            }
-                            if domain_portals.is_empty() {
-                                domain_portals = ip_portals;
-                            }
-                        }
+                        discover_from_subnets(KNOWN_SUBNETS, &mut domain_portals, &mut ip_fallback).await;
                         break;
                     }
 
-                    // Direct IP — reverse-IP lookup to find all domains
+                    // Direct IP — reverse-IP lookup
                     tracing::info!("[discover] direct IP {} — reverse lookup", v4);
                     let domains = reverse_ip_lookup(&v4.to_string()).await;
                     if !domains.is_empty() {
                         tracing::info!("[discover] {} domains found via reverse-IP", domains.len());
                         test_domains(&domains, &mut domain_portals).await;
                     }
-
-                    // Fallback: scan subnet for more IPs
-                    if domain_portals.is_empty() {
-                        let subnet = format!("{}.{}.{}", octets[0], octets[1], octets[2]);
-                        tracing::info!("[discover] reverse-IP empty, scanning subnet {}", subnet);
-                        scan_subnet(&subnet, &mut domain_portals).await;
-                        // Reverse-IP on found IPs
-                        let ip_only: Vec<_> = domain_portals.drain(..).collect();
-                        for (ip_url, _) in &ip_only {
-                            let ip_str = ip_url.trim_start_matches("http://").trim_end_matches(":80");
-                            let domains = reverse_ip_lookup(ip_str).await;
-                            if domains.is_empty() {
-                                domain_portals.push((ip_url.clone(), 0.0));
-                            } else {
-                                test_domains(&domains, &mut domain_portals).await;
-                            }
-                        }
-                        if domain_portals.is_empty() {
-                            domain_portals = ip_only;
-                        }
-                    }
+                    // Also scan subnet for neighboring IPs
+                    let subnet = format!("{}.{}.{}", octets[0], octets[1], octets[2]);
+                    discover_from_subnets(&[&subnet], &mut domain_portals, &mut ip_fallback).await;
                     break;
                 }
             }
         }
     }
 
-    // Step 2: Nothing found? Scan all known subnets
+    // Fallback: scan known subnets
     if domain_portals.is_empty() {
-        for subnet in KNOWN_SUBNETS {
-            scan_subnet(subnet, &mut domain_portals).await;
-        }
+        discover_from_subnets(KNOWN_SUBNETS, &mut domain_portals, &mut ip_fallback).await;
     }
 
-    // Sort by latency, dedup
+    // Prefer domain portals over bare IPs. Only use IPs if no domains found.
+    if domain_portals.is_empty() {
+        domain_portals = ip_fallback;
+    }
+
     domain_portals.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     domain_portals.dedup_by(|a, b| a.0 == b.0);
 
@@ -107,6 +73,34 @@ pub async fn discover_portals(portal_url: &str) -> DiscoverResult {
         best_portal: best,
         discovered: !all.is_empty(),
         all_portals: all,
+    }
+}
+
+/// Scan subnets, do reverse-IP on found IPs. Domains go into `domain_portals`,
+/// bare IPs (where reverse-IP returned nothing) go into `ip_fallback` as last resort.
+/// Only does one reverse-IP lookup per subnet — all IPs on same /24 share domains.
+async fn discover_from_subnets(
+    subnets: &[&str],
+    domain_portals: &mut Vec<(String, f64)>,
+    ip_fallback: &mut Vec<(String, f64)>,
+) {
+    for subnet in subnets {
+        let mut found = Vec::new();
+        scan_subnet(subnet, &mut found).await;
+        if found.is_empty() {
+            continue;
+        }
+        // One reverse-IP lookup per subnet (all IPs share same domains)
+        let sample_ip = found[0].0.trim_start_matches("http://").trim_end_matches(":80");
+        let domains = reverse_ip_lookup(sample_ip).await;
+        if !domains.is_empty() {
+            tracing::info!("[discover] subnet {} → {} domains, testing...", subnet, domains.len());
+            test_domains(&domains, domain_portals).await;
+        }
+        // Only use IP fallback if no domains at all
+        if domain_portals.is_empty() {
+            ip_fallback.extend(found);
+        }
     }
 }
 
