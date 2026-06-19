@@ -201,69 +201,8 @@ async fn proxy_handler(
                     ))
                     .unwrap();
             }
-            "get_ordered_list" if query.r#type.as_deref() == Some("itv") => {
-                // Serve from local cache with genre filter, dedup, suffix strip, pagination.
-                let genre_id = query.extra.get("genre").cloned().unwrap_or_default();
-                // Stalker uses 0-based page index (p=0 = first page).
-                let page: usize = query.extra.get("p").and_then(|p| p.parse::<usize>().ok()).map(|p| p + 1).unwrap_or(1);
-                let per_page: usize = 14;
-                let filter = st.filter.read().await;
-                // Collect matching channels + pre-compute renamed/ranked data
-                let channels_guard = st.channels.read().await;
-                // Clone channel data to release the lock early
-                let mut items: Vec<(stalker::Channel, String, u8)> = channels_guard.values()
-                    .filter(|ch| {
-                        if genre_id == "*" || genre_id.is_empty() { return true; }
-                        ch.genre_id == genre_id
-                    })
-                    .filter(|ch| filter.is_channel_allowed(st.profile_id, &ch.cmd, &ch.genre_id))
-                    .map(|ch| {
-                        let renamed = filter.apply_rename(st.profile_id, &ch.title);
-                        let rank = crate::hls::resolution_rank(&ch.title);
-                        (ch.clone(), renamed, rank)
-                    })
-                    .collect();
-                drop(channels_guard);
-                drop(filter);
-                // Sort by quality (descending)
-                items.sort_by_key(|(_, _, r)| -(*r as i32));
-                // Dedup by base + drop separators
-                let mut seen = std::collections::HashSet::new();
-                items.retain(|(_, name, _)| {
-                    if name.starts_with('#') { return false; }
-                    seen.insert(crate::hls::base_name(name))
-                });
-                // Paginate + generate display names (base_name strips resolution suffix)
-                let total = items.len();
-                let start = ((page - 1) * per_page).min(total);
-                let end = (start + per_page).min(total);
-                let page_items: Vec<serde_json::Value> = items[start..end].iter().enumerate().map(|(idx, (ch, name, _))| {
-                    let num = start + idx + 1;
-                    let ch_id = extract_stream_id(&ch.cmd);
-                    serde_json::json!({
-                        "id": ch_id,
-                        "name": crate::hls::base_name(name),
-                        "number": num.to_string(),
-                        "cmd": ch.cmd,
-                        "logo": ch.logo,
-                        "tv_genre_id": ch.genre_id,
-                        "use_http_tmp_link": "1",
-                        "use_load_balancing": "1",
-                        "cmds": [{"id": ch_id, "ch_id": ch.cmd_ch_id, "url": ch.cmd, "use_http_tmp_link": "1"}]
-                    })
-                }).collect();
-                return Response::builder()
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(serde_json::to_string(&serde_json::json!({
-                        "js": {
-                            "total_items": total,
-                            "max_page_items": per_page,
-                            "cur_page": page,
-                            "data": page_items
-                        }
-                    })).unwrap()))
-                    .unwrap();
-            }
+            // get_ordered_list falls through to portal proxy — portal handles pagination correctly.
+            // The rewrite handler applies rename, dedup, and suffix stripping to the response.
             "get_all_channels" if query.r#type.as_deref() == Some("itv") => {
                 // Serve from local cache with rename, # filtering, and quality dedup.
                 let filter = st.filter.read().await;
@@ -819,37 +758,19 @@ fn rewrite_channel_list_response(
 
     match (action, media_type) {
         ("get_ordered_list", "itv" | "vod" | "series") => {
-            // Rename, dedup (keep highest quality), strip resolution suffixes from display.
+            // Only rename + strip suffixes + filter # separators — no dedup here.
+            // The portal handles pagination; dedup would create empty slots.
             if let Some(data) = json["js"]["data"].as_array_mut() {
-                // Step 1: rename (prefix strip)
                 for item in data.iter_mut() {
                     if let Some(name) = item["name"].as_str() {
-                        item["name"] = serde_json::Value::String(
-                            filter.apply_rename(profile_id, name)
-                        );
+                        let renamed = filter.apply_rename(profile_id, name);
+                        // Strip resolution suffix from display name
+                        item["name"] = serde_json::Value::String(crate::hls::base_name(&renamed));
                     }
                 }
-                // Step 2: sort by quality (original name with suffix)
-                data.sort_by_key(|item| {
-                    let name = item["name"].as_str().unwrap_or("");
-                    -(crate::hls::resolution_rank(name) as i32)
-                });
-                // Step 3: dedup by base name (without resolution suffix)
-                let mut seen = std::collections::HashSet::new();
                 data.retain(|item| {
-                    let name = item["name"].as_str().unwrap_or("");
-                    if name.starts_with('#') { return false; }
-                    let base = crate::hls::base_name(name);
-                    seen.insert(base)
+                    !item["name"].as_str().map_or(false, |n| n.starts_with('#'))
                 });
-                // Step 4: strip resolution suffix from remaining names
-                for item in data.iter_mut() {
-                    if let Some(name) = item["name"].as_str() {
-                        item["name"] = serde_json::Value::String(
-                            crate::hls::base_name(name)
-                        );
-                    }
-                }
             }
             Some(serde_json::to_vec(&json).ok()?)
         }
