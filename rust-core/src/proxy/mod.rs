@@ -244,16 +244,22 @@ async fn proxy_handler(
                 }
                 let total = deduped.len();
                 let total_pages = if total > 0 { (total + per_page - 1) / per_page } else { 1 };
+                // Clamp page to valid range — prevent empty pages that confuse STB
+                let p = p.min(total_pages.saturating_sub(1));
                 let start = (p * per_page).min(total);
                 let end = (start + per_page).min(total);
-                let page_items: Vec<serde_json::Value> = deduped[start..end].to_vec();
+                let page_items: Vec<serde_json::Value> = if start < total {
+                    deduped[start..end].to_vec()
+                } else {
+                    Vec::new()
+                };
                 return Response::builder()
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&serde_json::json!({
                         "js": {
                             "total_items": total,
                             "max_page_items": per_page,
-                            "cur_page": p + 1,
+                            "cur_page": p,
                             "data": page_items
                         }
                     })).unwrap()))
