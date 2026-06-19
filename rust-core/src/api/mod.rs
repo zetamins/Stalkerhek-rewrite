@@ -182,14 +182,41 @@ async fn create_profile(
         proxy_rewrite: req.proxy_rewrite.unwrap_or(true),
         fallback_portals: req.fallback_portals.unwrap_or_default(),
     };
-    // Auto-detect local timezone if none provided
     let mut cfg = cfg;
     if cfg.timezone.is_empty() {
         cfg.timezone = crate::dns::get_local_timezone().await;
     }
     profiles.push(cfg.clone());
     save_profiles(&profiles, &st.data_dir);
-    Json(cfg)
+    let returned = cfg.clone();
+
+    // Auto-discover fallback portals in background — don't block profile save.
+    // Discovered portals update the profile asynchronously and persist to disk.
+    if cfg.fallback_portals.is_empty() {
+        let profiles_ref = st.profiles.clone();
+        let data_dir = st.data_dir.clone();
+        let profile_id = cfg.id;
+        let portal_url = cfg.portal_url.clone();
+        tokio::spawn(async move {
+            let discover = crate::discover::discover_portals(&portal_url).await;
+            if discover.discovered {
+                tracing::info!(
+                    "[discover] profile {}: found {} portals, best: {}",
+                    profile_id,
+                    discover.all_portals.len(),
+                    discover.best_portal
+                );
+                let mut profiles = profiles_ref.write().await;
+                if let Some(p) = profiles.iter_mut().find(|p| p.id == profile_id) {
+                    p.fallback_portals = discover.all_portals;
+                    p.portal_url = discover.best_portal;
+                    save_profiles(&profiles, &data_dir);
+                }
+            }
+        });
+    }
+
+    Json(returned)
 }
 
 async fn get_profile(
