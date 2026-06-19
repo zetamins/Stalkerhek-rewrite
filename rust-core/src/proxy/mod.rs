@@ -201,78 +201,7 @@ async fn proxy_handler(
                     ))
                     .unwrap();
             }
-            "get_ordered_list" if query.r#type.as_deref() == Some("itv") => {
-                // Global dedup from local cache — no per-page repeats.
-                let genre_id = query.extra.get("genre").cloned().unwrap_or_default();
-                let p: usize = query.extra.get("p").and_then(|p| p.parse().ok()).unwrap_or(0);
-                let per_page: usize = 14;
-                let filter = st.filter.read().await;
-                let channels_guard = st.channels.read().await;
-                let mut seen = std::collections::HashSet::new();
-                let mut all_items: Vec<(stalker::Channel, String, u8)> = channels_guard.values()
-                    .filter(|ch| genre_id == "*" || genre_id.is_empty() || ch.genre_id == genre_id)
-                    .filter(|ch| filter.is_channel_allowed(st.profile_id, &ch.cmd, &ch.genre_id))
-                    .map(|ch| {
-                        let renamed = filter.apply_rename(st.profile_id, &ch.title);
-                        let rank = crate::hls::resolution_rank(&ch.title);
-                        (ch.clone(), renamed, rank)
-                    })
-                    .collect();
-                drop(channels_guard);
-                drop(filter);
-                // Sort by quality descending, then dedup by base name
-                all_items.sort_by_key(|(_, _, r)| -(*r as i32));
-                let mut deduped: Vec<serde_json::Value> = Vec::new();
-                for (ch, renamed, _) in &all_items {
-                    if renamed.starts_with('#') { continue; }
-                    let base = crate::hls::base_name(renamed);
-                    if seen.insert(base.clone()) {
-                        let ch_id = extract_stream_id(&ch.cmd);
-                        let num = deduped.len() + 1;
-                        // Route playback through HLS server
-                        let host = headers.get("host")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|h| h.split(':').next())
-                            .unwrap_or("localhost");
-                        let hls_url = format!("ffmpeg http://{}:{}/{}", host,
-                            st.hls_bind.split(':').last().unwrap_or("4600"),
-                            url_encode(&ch.title));
-                        deduped.push(serde_json::json!({
-                            "id": ch_id,
-                            "name": base,
-                            "number": num.to_string(),
-                            "cmd": hls_url,
-                            "logo": ch.logo,
-                            "tv_genre_id": ch.genre_id,
-                            "use_http_tmp_link": "1",
-                            "use_load_balancing": "1",
-                            "cmds": [{"id": ch_id, "ch_id": ch.cmd_ch_id, "url": hls_url, "use_http_tmp_link": "1"}]
-                        }));
-                    }
-                }
-                let total = deduped.len();
-                let total_pages = if total > 0 { (total + per_page - 1) / per_page } else { 1 };
-                // Clamp page to valid range — prevent empty pages that confuse STB
-                let p = p.min(total_pages.saturating_sub(1));
-                let start = (p * per_page).min(total);
-                let end = (start + per_page).min(total);
-                let page_items: Vec<serde_json::Value> = if start < total {
-                    deduped[start..end].to_vec()
-                } else {
-                    Vec::new()
-                };
-                return Response::builder()
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(serde_json::to_string(&serde_json::json!({
-                        "js": {
-                            "total_items": total,
-                            "max_page_items": per_page,
-                            "cur_page": p,
-                            "data": page_items
-                        }
-                    })).unwrap()))
-                    .unwrap();
-            }
+            // get_ordered_list falls through to portal proxy
             // VOD/series get_ordered_list falls through to portal proxy
             "get_all_channels" if query.r#type.as_deref() == Some("itv") => {
                 // Serve from local cache with rename, # filtering, and quality dedup.
@@ -298,17 +227,9 @@ async fn proxy_handler(
                     })
                     .collect();
                 drop(filter);
-                // Drop # separators + quality dedup (keep highest quality)
-                data.sort_by_key(|item| {
-                    let name = item["name"].as_str().unwrap_or("");
-                    -(crate::hls::resolution_rank(name) as i32)
-                });
-                let mut seen = std::collections::HashSet::new();
+                // Drop # separators only
                 data.retain(|item| {
-                    let name = item["name"].as_str().unwrap_or("");
-                    if name.starts_with('#') { return false; }
-                    let base = crate::hls::base_name(name);
-                    seen.insert(base)
+                    !item["name"].as_str().map_or(false, |n| n.starts_with('#'))
                 });
                 return Response::builder()
                     .header("Content-Type", "application/json")
@@ -829,8 +750,7 @@ fn rewrite_channel_list_response(
 
     match (action, media_type) {
         ("get_ordered_list", "itv" | "vod" | "series") => {
-            // Group same-base channels into one entry (RAI 1 4K + RAI 1 HD → RAI 1).
-            // Keep portal's original total_items so pagination stays correct.
+            // Apply rename + filter # separators only. No dedup — portal paginates.
             if let Some(data) = json["js"]["data"].as_array_mut() {
                 for item in data.iter_mut() {
                     if let Some(name) = item["name"].as_str() {
@@ -842,23 +762,6 @@ fn rewrite_channel_list_response(
                 data.retain(|item| {
                     !item["name"].as_str().map_or(false, |n| n.starts_with('#'))
                 });
-                // Sort by quality (descending) → highest quality kept per group
-                data.sort_by_key(|item| {
-                    let name = item["name"].as_str().unwrap_or("");
-                    -(crate::hls::resolution_rank(name) as i32)
-                });
-                // Group by base name — keep only first (highest quality) per group
-                let mut seen = std::collections::HashSet::new();
-                data.retain(|item| {
-                    let name = item["name"].as_str().unwrap_or("");
-                    seen.insert(crate::hls::base_name(name))
-                });
-                // Strip suffix: "RAI 1 4K" → "RAI 1"
-                for item in data.iter_mut() {
-                    if let Some(name) = item["name"].as_str() {
-                        item["name"] = serde_json::Value::String(crate::hls::base_name(name));
-                    }
-                }
             }
             Some(serde_json::to_vec(&json).ok()?)
         }
@@ -875,23 +778,13 @@ fn rewrite_channel_list_response(
                 if name.starts_with('#') { return false; }
                 filter.is_channel_allowed(profile_id, cmd, genre_id)
             }).collect();
-            // Rename first, then sort by quality + dedup
+            // Rename only — no dedup
             for item in data.iter_mut() {
                 if let Some(name) = item["name"].as_str() {
                     let renamed = filter.apply_rename(profile_id, name);
                     item["name"] = serde_json::Value::String(renamed);
                 }
             }
-            data.sort_by_key(|item| {
-                let name = item["name"].as_str().unwrap_or("");
-                -(crate::hls::resolution_rank(name) as i32)
-            });
-            let mut seen = std::collections::HashSet::new();
-            data.retain(|item| {
-                let name = item["name"].as_str().unwrap_or("");
-                let base = crate::hls::base_name(name);
-                seen.insert(base)
-            });
             Some(serde_json::to_vec(&json).ok()?)
         }
         // Filter disabled genres from genre/category lists shown in STB

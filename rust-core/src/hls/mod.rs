@@ -7,7 +7,6 @@ use axum::{
     Router,
 };
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -218,24 +217,9 @@ async fn playlist_handler(
     let epg_url = format!("{}://{}/epg", scheme, host);
     let mut output = format!("#EXTM3U x-tvg-url=\"{}\"\n", epg_url);
     let channels = st.channels.read().await;
-    // Sort by quality (descending) so highest-quality variant is emitted first.
-    // Use raw title (with prefix) for ranking and base-name to keep
-    // different genre/country channels from merging (e.g. IT| SKY vs UK| SKY).
-    let mut sorted_indices: Vec<(usize, u8)> = channels.iter().enumerate()
-        .filter(|(_, ch)| filter.is_channel_allowed(st.profile_id, &ch.info.cmd, &ch.info.genre_id))
-        .map(|(i, ch)| (i, resolution_rank(&ch.info.title)))
-        .collect();
-    sorted_indices.sort_by_key(|(_, r)| -(*r as i32));
-    let mut seen_bases: HashSet<String> = HashSet::new();
-    for (idx, _rank) in sorted_indices {
-        let ch = &channels[idx];
-        let raw_title = &ch.info.title;
-        let display_title = filter.apply_rename(st.profile_id, &raw_title);
-        // Quality dedup: compute base from RAW title (with prefix) so
-        // channels from different genres don't merge
-        let base = base_name(raw_title);
-        if seen_bases.contains(&base) { continue; }
-        seen_bases.insert(base);
+    for ch in channels.iter() {
+        if !filter.is_channel_allowed(st.profile_id, &ch.info.cmd, &ch.info.genre_id) { continue; }
+        let display_title = filter.apply_rename(st.profile_id, &ch.info.title);
         let logo = format!("/logo/{}", url_encode(&display_title));
         let link = format!("{}://{}/{}", scheme, host, url_encode(&display_title));
         let genre = filter.apply_genre_rename(st.profile_id, &ch.info.genre_id, &ch.info.genre);
