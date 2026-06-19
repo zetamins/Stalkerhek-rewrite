@@ -421,7 +421,17 @@ async fn channel_handler(
                         .body(Body::from(body_bytes)).unwrap();
                 }
                 Err(e) => {
-                    tracing::warn!("[HLS] fetch_stream failed for {try_title}: {e}");
+                    let err_msg = e.to_string();
+                    tracing::warn!("[HLS] fetch_stream failed for {try_title}: {err_msg}");
+                    // Per-MAC streaming limit (Cloudflare 458): trigger Identity Multiversing
+                    // Rotates only the stream MAC — auth session stays valid.
+                    if err_msg.contains("458") || err_msg.contains("444") {
+                        drop(pc);
+                        if let Ok(mut client) = st.portal_client.try_write() {
+                            client.reborn();
+                            tracing::info!("[HLS] reborn triggered — new stream MAC, auth unchanged");
+                        }
+                    }
                     continue;
                 }
             }
