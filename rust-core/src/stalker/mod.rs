@@ -100,13 +100,7 @@ pub(crate) fn model_fingerprint(model: &str) -> ModelFingerprint {
 #[derive(Debug, Clone)]
 pub struct PortalClient {
     pub base_url: String,
-    /// MAC address used for authentication (handshake, get_profile).
-    /// This should match the real STB to keep the account session valid.
     pub mac: String,
-    /// MAC address used for streaming (create_link, play/live.php).
-    /// Can differ from `mac` to bypass per-device streaming limits
-    /// while keeping the auth session alive.
-    pub stream_mac: String,
     pub username: String,
     pub password: String,
     pub serial_number: String,
@@ -136,15 +130,10 @@ impl PortalClient {
     }
 
     /// Omnipotent Method 2: Identity Multiversing
-    /// Rotates only the streaming MAC — auth MAC stays as the real STB.
-    /// This bypasses per-MAC streaming limits without breaking the session.
+    /// Instantly "kills" the current session and regenerates a fresh identity.
     pub fn reborn(&mut self) {
         self.incarnation += 1;
-
-        // Rotate only the stream MAC — auth stays with the original.
-        // Portal sees a different device for streaming, but our
-        // handshake token remains valid.
-        self.stream_mac = Self::generate_alt_mac(self.incarnation);
+        self.token.clear();
 
         // Clear sticky identity for this host to force a new European IP/TZ
         let host_str = url::Url::parse(&self.base_url).ok().and_then(|u| u.host_str().map(|s| s.to_string())).unwrap_or_default();
@@ -152,18 +141,7 @@ impl PortalClient {
             crate::dns::clear_sticky_identity(&host_str);
         }
 
-        tracing::info!("[STALKER] Identity Multiversing triggered (Incarnation: {}, stream MAC: {})", self.incarnation, self.stream_mac);
-    }
-
-    /// Generate a unique MAC address for a given incarnation number.
-    /// Uses Infomir OUI prefixes with a deterministic suffix.
-    fn generate_alt_mac(incarnation: u32) -> String {
-        let ouis = ["001A79", "001E5F", "080028", "C82E46"];
-        let oui = ouis[(incarnation as usize) % ouis.len()];
-        let suffix = format!("{:06X}", incarnation.wrapping_mul(0x9E3779B9) & 0xFFFFFF);
-        format!("{}:{}:{}:{}:{}:{}",
-            &oui[0..2], &oui[2..4], &oui[4..6],
-            &suffix[0..2], &suffix[2..4], &suffix[4..6])
+        tracing::info!("[STALKER] Identity Multiversing triggered (Incarnation: {})", self.incarnation);
     }
 
     fn get_stealth_params(&self) -> (String, String, String, String, String) {
@@ -332,10 +310,9 @@ impl PortalClient {
         builder = Self::configure_stealth_client(builder);
 
         let client = builder.build().expect("Failed to build HTTP client");
-        let stream_mac = mac.clone();
 
         Self {
-            base_url, mac, stream_mac, username, password, serial_number, device_id,
+            base_url, mac, username, password, serial_number, device_id,
             device_id2, signature, model, timezone, device_id_auth,
             token: String::new(), incarnation: 0, client,
             etags: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
@@ -686,18 +663,15 @@ impl PortalClient {
         // Send cmd RAW -- the portal's PHP parser splits embedded &params
         // as top-level form fields. URL-encoding the cmd would hide stream=XXXXX
         // from the parser, making it return stream= (empty).
-        // Replace auth MAC with stream MAC in the cmd URL — portal uses the
-        // MAC from the URL when generating the stream link.
-        let cmd = cmd.replace(&self.mac, &self.stream_mac);
         let body_str = if stream_id.is_empty() {
             format!(
                 "cmd={}&mac={}&sn={}&stb_type={}",
-                cmd, urlencoding(&self.stream_mac), urlencoding(&self.serial_number), urlencoding(&self.model)
+                cmd, urlencoding(&self.mac), urlencoding(&self.serial_number), urlencoding(&self.model)
             )
         } else {
             format!(
                 "cmd={}&mac={}&sn={}&stb_type={}&stream={}",
-                cmd, urlencoding(&self.stream_mac), urlencoding(&self.serial_number), urlencoding(&self.model), &stream_id
+                cmd, urlencoding(&self.mac), urlencoding(&self.serial_number), urlencoding(&self.model), &stream_id
             )
         };
         let resp = self.client.post(&url)
