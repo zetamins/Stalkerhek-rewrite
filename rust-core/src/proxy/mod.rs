@@ -758,10 +758,8 @@ fn rewrite_channel_list_response(
 
     match (action, media_type) {
         ("get_ordered_list", "itv" | "vod" | "series") => {
-            // Rename + filter # separators. Keep resolution suffixes so
-            // variants are distinguishable. No dedup — the portal paginates
-            // per-page and we can't dedup across pages without caching globally.
-            // Quality selection happens via HLS playback fallback transparently.
+            // Group same-base channels into one entry (RAI 1 4K + RAI 1 HD → RAI 1).
+            // Keep portal's original total_items so pagination stays correct.
             if let Some(data) = json["js"]["data"].as_array_mut() {
                 for item in data.iter_mut() {
                     if let Some(name) = item["name"].as_str() {
@@ -773,6 +771,23 @@ fn rewrite_channel_list_response(
                 data.retain(|item| {
                     !item["name"].as_str().map_or(false, |n| n.starts_with('#'))
                 });
+                // Sort by quality (descending) → highest quality kept per group
+                data.sort_by_key(|item| {
+                    let name = item["name"].as_str().unwrap_or("");
+                    -(crate::hls::resolution_rank(name) as i32)
+                });
+                // Group by base name — keep only first (highest quality) per group
+                let mut seen = std::collections::HashSet::new();
+                data.retain(|item| {
+                    let name = item["name"].as_str().unwrap_or("");
+                    seen.insert(crate::hls::base_name(name))
+                });
+                // Strip suffix: "RAI 1 4K" → "RAI 1"
+                for item in data.iter_mut() {
+                    if let Some(name) = item["name"].as_str() {
+                        item["name"] = serde_json::Value::String(crate::hls::base_name(name));
+                    }
+                }
             }
             Some(serde_json::to_vec(&json).ok()?)
         }
