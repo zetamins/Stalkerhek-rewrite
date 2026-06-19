@@ -758,49 +758,21 @@ fn rewrite_channel_list_response(
 
     match (action, media_type) {
         ("get_ordered_list", "itv" | "vod" | "series") => {
-            // Rename, quality-dedup, strip suffix, drop separators.
-            // Compute base from RAW title (with prefix) so different countries
-            // don't merge (IT| SKY SPORT ≠ UK| SKY SPORT).
-            let new_total;
+            // Rename + filter # separators. Keep resolution suffixes so
+            // variants are distinguishable. No dedup — the portal paginates
+            // per-page and we can't dedup across pages without caching globally.
+            // Quality selection happens via HLS playback fallback transparently.
             if let Some(data) = json["js"]["data"].as_array_mut() {
-                // Pre-compute display names
                 for item in data.iter_mut() {
                     if let Some(name) = item["name"].as_str() {
-                        let display = filter.apply_rename(profile_id, name);
-                        item["name"] = serde_json::Value::String(display);
+                        item["name"] = serde_json::Value::String(
+                            filter.apply_rename(profile_id, name)
+                        );
                     }
                 }
                 data.retain(|item| {
                     !item["name"].as_str().map_or(false, |n| n.starts_with('#'))
                 });
-                // Sort by resolution_rank on RAW name (pre-rename) — use current name which still has suffix
-                data.sort_by_key(|item| {
-                    let name = item["name"].as_str().unwrap_or("");
-                    -(crate::hls::resolution_rank(name) as i32)
-                });
-                // Dedup: use the current (renamed+with-suffix) name for base, so
-                // "SKY SPORT 1 4K" and "SKY SPORT 1 HD" both → base "SKY SPORT 1" → deduped.
-                // But "UK| SKY SPORT 1" (raw) and "IT| SKY SPORT 1" (raw) have different bases
-                // because the prefix was already stripped, so we need to compute base from RAW.
-                // Since we already renamed, base is the same for both. We accept that
-                // channels from different countries may merge — that's the desired behavior.
-                let mut seen = std::collections::HashSet::new();
-                data.retain(|item| {
-                    let name = item["name"].as_str().unwrap_or("");
-                    seen.insert(crate::hls::base_name(name))
-                });
-                // Strip suffix for display
-                for item in data.iter_mut() {
-                    if let Some(name) = item["name"].as_str() {
-                        item["name"] = serde_json::Value::String(crate::hls::base_name(name));
-                    }
-                }
-                new_total = data.len();
-            } else {
-                new_total = 0;
-            }
-            if let Some(total) = json["js"].get_mut("total_items") {
-                *total = serde_json::Value::Number(new_total.into());
             }
             Some(serde_json::to_vec(&json).ok()?)
         }
