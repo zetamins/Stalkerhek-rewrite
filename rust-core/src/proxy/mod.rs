@@ -742,7 +742,7 @@ fn rewrite_channel_list_response(
         ("get_ordered_list", "itv" | "vod" | "series") => {
             // Don't filter channels from the list -- the genre list hides disabled genres
             // so users navigate to specific genres for filtered results, and create_link
-            // blocks playback for disabled channels. Just apply renames.
+            // blocks playback for disabled channels. Just apply renames and drop separators.
             if let Some(data) = json["js"]["data"].as_array_mut() {
                 for item in data.iter_mut() {
                     if let Some(name) = item["name"].as_str() {
@@ -750,6 +750,8 @@ fn rewrite_channel_list_response(
                         item["name"] = serde_json::Value::String(renamed);
                     }
                 }
+                // Drop separator channels (names starting with # like "##### ITALY #####")
+                data.retain(|item| !item["name"].as_str().map_or(false, |n| n.starts_with('#')));
             }
             Some(serde_json::to_vec(&json).ok()?)
         }
@@ -758,9 +760,13 @@ fn rewrite_channel_list_response(
             let data = json["js"]["data"].as_array_mut()?;
             let mut cmd_buf = String::new();
             let mut genre_buf = String::new();
+            let mut name_buf = String::new();
             *data = std::mem::take(data).into_iter().filter(|item| {
                 let cmd = json_str(&item["cmd"], &mut cmd_buf);
                 let genre_id = json_str(&item["tv_genre_id"], &mut genre_buf);
+                // Drop separator channels
+                let name = json_str(&item["name"], &mut name_buf);
+                if name.starts_with('#') { return false; }
                 filter.is_channel_allowed(profile_id, cmd, genre_id)
             }).collect();
             for item in data.iter_mut() {
