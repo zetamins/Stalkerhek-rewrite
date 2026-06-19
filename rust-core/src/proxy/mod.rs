@@ -237,10 +237,12 @@ async fn proxy_handler(
                 let total = items.len();
                 let start = ((page - 1) * per_page).min(total);
                 let end = (start + per_page).min(total);
-                let page_items: Vec<serde_json::Value> = items[start..end].iter().map(|(ch, name, _)| {
+                let page_items: Vec<serde_json::Value> = items[start..end].iter().enumerate().map(|(idx, (ch, name, _))| {
+                    let num = start + idx + 1;
                     serde_json::json!({
+                        "id": ch.cmd_id,
                         "name": crate::hls::base_name(name),
-                        "number": "0",
+                        "number": num.to_string(),
                         "cmd": ch.cmd,
                         "logo": ch.logo,
                         "tv_genre_id": ch.genre_id,
@@ -267,11 +269,13 @@ async fn proxy_handler(
                 let channels_guard = st.channels.read().await;
                 let mut data: Vec<serde_json::Value> = channels_guard.values()
                     .filter(|ch| filter.is_channel_allowed(st.profile_id, &ch.cmd, &ch.genre_id))
-                    .map(|ch| {
+                    .enumerate()
+                    .map(|(i, ch)| {
                         let renamed = filter.apply_rename(st.profile_id, &ch.title);
                         serde_json::json!({
+                            "id": ch.cmd_id,
                             "name": renamed,
-                            "number": "0",
+                            "number": (i + 1).to_string(),
                             "cmd": ch.cmd,
                             "logo": ch.logo,
                             "tv_genre_id": ch.genre_id,
