@@ -228,10 +228,11 @@ async fn proxy_handler(
                     let base = crate::hls::base_name(renamed);
                     if seen.insert(base.clone()) {
                         let ch_id = extract_stream_id(&ch.cmd);
+                        let num = deduped.len() + 1;
                         deduped.push(serde_json::json!({
                             "id": ch_id,
                             "name": base,
-                            "number": "0",
+                            "number": num.to_string(),
                             "cmd": ch.cmd,
                             "logo": ch.logo,
                             "tv_genre_id": ch.genre_id,
