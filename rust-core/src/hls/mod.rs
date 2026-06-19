@@ -79,8 +79,7 @@ pub(crate) fn base_name(title: &str) -> String {
     if strip == 0 {
         return title.to_string();
     }
-    let keep = words.len() - strip;
-    words[keep..].iter().rev().copied().collect::<Vec<_>>().join(" ")
+    words[strip..].iter().rev().copied().collect::<Vec<_>>().join(" ")
 }
 
 #[derive(Clone)]

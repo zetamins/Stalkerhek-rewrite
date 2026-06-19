@@ -201,6 +201,58 @@ async fn proxy_handler(
                     ))
                     .unwrap();
             }
+            "get_ordered_list" if matches!(query.r#type.as_deref(), Some("itv" | "vod" | "series")) => {
+                // Serve from local cache with genre filter, dedup, suffix strip, correct pagination.
+                let genre_id = query.extra.get("genre").cloned().unwrap_or_default();
+                let page: usize = query.extra.get("p").and_then(|p| p.parse().ok()).unwrap_or(1);
+                let per_page: usize = 14;
+                let filter = st.filter.read().await;
+                let channels_guard = st.channels.read().await;
+                let mut matches: Vec<&stalker::Channel> = channels_guard.values()
+                    .filter(|ch| {
+                        if genre_id == "*" || genre_id.is_empty() { return true; }
+                        ch.genre_id == genre_id
+                    })
+                    .filter(|ch| filter.is_channel_allowed(st.profile_id, &ch.cmd, &ch.genre_id))
+                    .collect();
+                // Sort by quality (descending)
+                matches.sort_by_key(|ch| -(crate::hls::resolution_rank(&ch.title) as i32));
+                // Dedup by base name
+                let mut seen = std::collections::HashSet::new();
+                matches.retain(|ch| {
+                    let name = filter.apply_rename(st.profile_id, &ch.title);
+                    if name.starts_with('#') { return false; }
+                    seen.insert(crate::hls::base_name(&name))
+                });
+                let total = matches.len();
+                let total_pages = (total + per_page - 1) / per_page;
+                let start = ((page - 1) * per_page).min(total);
+                let end = (start + per_page).min(total);
+                let page_items: Vec<serde_json::Value> = matches[start..end].iter().map(|ch| {
+                    let display = crate::hls::base_name(
+                        &filter.apply_rename(st.profile_id, &ch.title)
+                    );
+                    serde_json::json!({
+                        "name": display,
+                        "cmd": ch.cmd,
+                        "logo": ch.logo,
+                        "tv_genre_id": ch.genre_id,
+                        "cmds": [{"id": ch.cmd_id, "ch_id": ch.cmd_ch_id}]
+                    })
+                }).collect();
+                drop(filter);
+                return Response::builder()
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&serde_json::json!({
+                        "js": {
+                            "total_items": total,
+                            "max_page_items": per_page,
+                            "cur_page": page,
+                            "data": page_items
+                        }
+                    })).unwrap()))
+                    .unwrap();
+            }
             "get_all_channels" if query.r#type.as_deref() == Some("itv") => {
                 // Serve from local cache with rename, # filtering, and quality dedup.
                 let filter = st.filter.read().await;
@@ -750,21 +802,37 @@ fn rewrite_channel_list_response(
 
     match (action, media_type) {
         ("get_ordered_list", "itv" | "vod" | "series") => {
-            // Only rename and drop separators — no dedup here.
-            // The STB paginates by genre and needs the original channel count
-            // for page calculations. Dedup is done in get_all_channels + HLS.
+            // Rename, dedup (keep highest quality), strip resolution suffixes from display.
             if let Some(data) = json["js"]["data"].as_array_mut() {
+                // Step 1: rename (prefix strip)
                 for item in data.iter_mut() {
                     if let Some(name) = item["name"].as_str() {
-                        let renamed = filter.apply_rename(profile_id, name);
-                        item["name"] = serde_json::Value::String(renamed);
+                        item["name"] = serde_json::Value::String(
+                            filter.apply_rename(profile_id, name)
+                        );
                     }
                 }
-                // Drop # separators only
+                // Step 2: sort by quality (original name with suffix)
+                data.sort_by_key(|item| {
+                    let name = item["name"].as_str().unwrap_or("");
+                    -(crate::hls::resolution_rank(name) as i32)
+                });
+                // Step 3: dedup by base name (without resolution suffix)
+                let mut seen = std::collections::HashSet::new();
                 data.retain(|item| {
                     let name = item["name"].as_str().unwrap_or("");
-                    !name.starts_with('#')
+                    if name.starts_with('#') { return false; }
+                    let base = crate::hls::base_name(name);
+                    seen.insert(base)
                 });
+                // Step 4: strip resolution suffix from remaining names
+                for item in data.iter_mut() {
+                    if let Some(name) = item["name"].as_str() {
+                        item["name"] = serde_json::Value::String(
+                            crate::hls::base_name(name)
+                        );
+                    }
+                }
             }
             Some(serde_json::to_vec(&json).ok()?)
         }
