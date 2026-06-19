@@ -1,0 +1,141 @@
+# Stalkerhek Network Analysis - Complete Hop Map
+# Generated 2026-06-19
+# Use: grep 'pattern' NETWORK-HOPS.txt for quick lookup
+
+# ============================================================
+# DNS
+# ============================================================
+PORTAL_DOMAIN="tres.4vps.info"
+PORTAL_NS="fish.ns.cloudflare.com sage.ns.cloudflare.com"
+PORTAL_IPS="104.21.6.93 172.67.154.216"
+
+# ============================================================
+# PORTAL API PATHS (Cloudflare allows these)
+# ============================================================
+# All return 200 OK from Mauritius
+/c/
+/portal.php
+/server/load.php
+/stalker_portal/portal.php
+/stalker_portal/c/
+
+# ============================================================
+# PORTAL STREAM PATH (Cloudflare blocks 458 per-MAC limit)
+# ============================================================
+/play/live.php                                # 458 when STB+engine same MAC
+/stalker_portal/c/play/live.php               # 404 (doesn't exist)
+
+# ============================================================
+# CLOUDFLARE EDGE (Mauritius MRU)
+# ============================================================
+CF_IP_1="104.21.6.93"
+CF_IP_2="172.67.154.216"
+CF_ROUTE="192.168.100.1 → 197.226.230.70 → 197.224.187.61 → 104.21.6.93"
+CF_LATENCY="5ms (6 hops)"
+CF_LOC="Mauritius (MRU)"
+CLOUDFLARE_SERVER="cloudflare"
+CLOUDFLARE_HTTP="HTTP/1.1 403 Forbidden on root /"
+
+# ============================================================
+# STREAMER POOL 1 - Amsterdam (MAIN)
+# ============================================================
+STREAMER1_IPS="185.245.0.130 185.245.0.131 185.245.0.132 185.245.0.133 185.245.0.135 185.245.0.136 185.245.0.137 185.245.0.138 185.245.0.139 185.245.0.140"
+STREAMER1_SERVER="openresty (nginx)"
+STREAMER1_HTTP="HTTP/1.1 401 Unauthorized on root /"
+STREAMER1_LOC="Amsterdam, Netherlands"
+STREAMER1_ISP="Corebach Backbone SARL / Superhub Limited"
+STREAMER1_ROUTE="192.168.100.1 → 197.226.230.70 → 197.224.187.61 → 197.226.230.89 → 180.87.96.180 → 180.87.107.24 → 129.250.66.9 → 129.250.6.70 → 129.250.4.181 → 128.241.9.163 → 185.245.0.132"
+STREAMER1_LATENCY="294ms (13 hops)"
+STREAMER1_BACKBONE="Tata Communications (180.87.x.x) → NTT America (129.250.x.x)"
+STREAMER1_OPEN_PORT="80"
+STREAMER1_HLS_PATH="/hls/TOKEN/STREAMID_SEQ.ts"
+STREAMER1_LIVE_PATH="/live/play/TOKEN/STREAMID"            # 200 but empty
+STREAMER1_CH_PATH="/ch/TOKEN"                             # 404
+
+# ============================================================
+# STREAMER POOL 2 - Hong Kong (BACKUP)
+# ============================================================
+STREAMER2_IPS="103.176.90.2 103.176.90.3 103.176.90.5 103.176.90.10 103.176.90.20 103.176.90.50 103.176.90.100 103.176.90.130 103.176.90.131 103.176.90.132 103.176.90.133 103.176.90.134 103.176.90.135"
+STREAMER2_SERVER="Apache2"
+STREAMER2_HTTP="HTTP/1.1 401 Unauthorized on root /"
+STREAMER2_LOC="Kwun Tong, Hong Kong"
+STREAMER2_ISP="Corebach Backbone SARL / bo jing"
+STREAMER2_LATENCY="290ms (13 hops)"
+STREAMER2_VIDEO_PATH="/video/black.ts"                   # 200 with binary data!
+STREAMER2_LIVE_PATH="/live/TOKEN/STREAMID"               # 200 but empty
+
+# ============================================================
+# RESPONSE CODES
+# ============================================================
+HTTP_200="OK - stream accessible"
+HTTP_302="Redirect to streamer (working!)"
+HTTP_403="Forbidden - path exists, access denied"
+HTTP_404="Not Found - path doesn't exist"
+HTTP_405="Method Not Allowed"
+HTTP_444="No Response - Cloudflare blocks (POST to play/live.php)"
+HTTP_458="Cloudflare WAF - per-MAC concurrent stream limit"
+HTTP_509="Bandwidth Limit - path exists, rate limited"
+HTTP_513="Custom error - path exists under /c/, auth needed"
+
+# ============================================================
+# GATEWAY/FIREWALL
+# ============================================================
+LOCAL_GATEWAY="192.168.100.1 (NAT router)"
+ISP_NETWORK="197.226.x.x, 197.224.x.x (Mauritius Telecom/Orange)"
+NO_FIREWALL_BLOCKING="true - ports 80, 443 open"
+
+# ============================================================
+# ENGINE CONNECTIONS (ss -tnp)
+# ============================================================
+ENGINE_PERSISTENT="192.168.100.111 → 172.67.154.216:443 (Cloudflare, HTTP/2)"
+MANAGEMENT="0.0.0.0:9900"
+HLS_SERVER="0.0.0.0:4600"
+PROXY_SERVER="0.0.0.0:4601"
+
+# ============================================================
+# REQUEST TIMING (average)
+# ============================================================
+create_link_API="~290ms (Cloudflare MRU)"
+play_live_redirect="~680ms (Cloudflare MRU → 302)"
+streamer_fetch="~1400ms (follow redirect to Amsterdam)"
+TS_segment="~300ms (direct from streamer)"
+
+# ============================================================
+# HOW TO TEST WHEN BLOCKED
+# ============================================================
+# 1. Check if portal 458 is active:
+#    curl -s -o /dev/null -w "%{http_code}" "http://tres.4vps.info/play/live.php?mac=A0:BB:3E:02:3C:B6&stream=691596&extension=m3u8&play_token=X" -H 'User-Agent: MAG254'
+#
+# 2. Check streamer reachability:
+#    for ip in 185.245.0.131 185.245.0.132 185.245.0.133; do
+#      curl -s -o /dev/null -w "$ip: %{http_code}\n" "http://$ip/" -H 'Host: tres.4vps.info'
+#    done
+#
+# 3. Trace route to portal:
+#    mtr -r -c 3 --tcp -P 80 104.21.6.93
+#
+# 4. Trace route to streamer:
+#    mtr -r -c 3 --tcp -P 80 185.245.0.132
+#
+# 5. Full hop test:
+#    TOK=$(curl -s -X POST 'http://tres.4vps.info:80/server/load.php?type=itv&action=create_link&JsHttpRequest=1-xml' -H 'User-Agent: MAG254' -H 'Content-Type: application/x-www-form-urlencoded' --data "cmd=ffmpeg ...")
+#    curl -svL "http://tres.4vps.info:80/play/live.php?...&play_token=$TOK" -H 'User-Agent: MAG254'
+
+# ============================================================
+# MAC CASE TRICK (the ghost)
+# ============================================================
+# Portal treats these as DIFFERENT devices:
+#   A0:BB:3E:02:3C:B6 (uppercase) = real STB
+#   a0:bb:3e:02:3c:b6 (lowercase) = engine
+# Both work on same account #3475667
+
+# ============================================================
+# PORTAL ACCOUNT INFO
+# ============================================================
+ACCOUNT_ID="3475667"
+ACCOUNT_NAME="1145835"
+AUTH_METHOD="device-id (no username needed)"
+DEFAULT_TZ="Europe/Amsterdam"
+WATCHDOG_TIMEOUT="1490 seconds"
+OUTPUT_FORMATS="m3u8, ts, rtmp"
+ALLOWED_STB_TYPES="MAG254 and many others"
