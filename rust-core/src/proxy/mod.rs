@@ -556,18 +556,15 @@ async fn proxy_handler(
     // Apply channel filtering and renaming to channel list responses
     let final_body = if status.is_success() {
         let filter = st.filter.read().await;
-        if filter.has_filters(st.profile_id) {
-            let genre = query.extra.get("genre").map(String::as_str);
-            rewrite_channel_list_response(&body_bytes, body_preview_for, media_type, &filter, st.profile_id, genre)
-                .map(Vec::from)
-                .unwrap_or_else(|| {
-                    tracing::warn!("[PROXY] rewrite_channel_list_response returned None for action={} type={} -- using original body", body_preview_for, media_type);
-                    body_bytes.to_vec()
-                })
-        } else {
-            tracing::trace!("[PROXY] no filters for profile {}, passing through", st.profile_id);
-            body_bytes.to_vec()
-        }
+        // Always apply prefix stripping via rewrite_channel_list_response,
+        // even when no filters are configured. Filtering is gated inside.
+        let genre = query.extra.get("genre").map(String::as_str);
+        rewrite_channel_list_response(&body_bytes, body_preview_for, media_type, &filter, st.profile_id, genre)
+            .map(Vec::from)
+            .unwrap_or_else(|| {
+                tracing::trace!("[PROXY] rewrite_channel_list_response returned None for action={} type={} -- using original body", body_preview_for, media_type);
+                body_bytes.to_vec()
+            })
     } else {
         match (body_preview_for, media_type) {
             ("get_ordered_list", "itv" | "vod" | "series") => {
