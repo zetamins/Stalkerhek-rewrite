@@ -758,14 +758,15 @@ fn rewrite_channel_list_response(
 
     match (action, media_type) {
         ("get_ordered_list", "itv" | "vod" | "series") => {
-            // Only rename + strip suffixes + filter # separators — no dedup here.
-            // The portal handles pagination; dedup would create empty slots.
+            // Rename + filter # separators. Keep resolution suffixes so
+            // channels are distinguishable (RAI 1 4K vs RAI 1 HD).
+            // Playback fallback handles quality selection in HLS server.
             if let Some(data) = json["js"]["data"].as_array_mut() {
                 for item in data.iter_mut() {
                     if let Some(name) = item["name"].as_str() {
-                        let renamed = filter.apply_rename(profile_id, name);
-                        // Strip resolution suffix from display name
-                        item["name"] = serde_json::Value::String(crate::hls::base_name(&renamed));
+                        item["name"] = serde_json::Value::String(
+                            filter.apply_rename(profile_id, name)
+                        );
                     }
                 }
                 data.retain(|item| {
