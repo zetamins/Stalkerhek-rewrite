@@ -181,6 +181,7 @@ async fn create_profile(
         proxy_enabled: req.proxy_enabled.unwrap_or(true),
         proxy_rewrite: req.proxy_rewrite.unwrap_or(true),
         fallback_portals: req.fallback_portals.unwrap_or_default(),
+        discovery_done: false,
     };
     let mut cfg = cfg;
     if cfg.timezone.is_empty() {
@@ -210,6 +211,7 @@ async fn create_profile(
                 if let Some(p) = profiles.iter_mut().find(|p| p.id == profile_id) {
                     p.fallback_portals = discover.all_portals;
                     p.portal_url = discover.best_portal;
+                    p.discovery_done = true;
                     save_profiles(&profiles, &data_dir);
                 }
             }

@@ -104,8 +104,19 @@ async fn discover_from_subnets(
     }
 }
 
-/// Query hackertarget for all domains hosted on an IP.
+/// Query reverse-IP providers for all domains hosted on an IP.
+/// Falls back through multiple providers.
 async fn reverse_ip_lookup(ip: &str) -> Vec<String> {
+    // Provider 1: hackertarget (most comprehensive, free, but rate-limited)
+    let domains = reverse_ip_hackertarget(ip).await;
+    if !domains.is_empty() {
+        return domains;
+    }
+    // Provider 2: yougetsignal (free, no key, limited results)
+    reverse_ip_yougetsignal(ip).await
+}
+
+async fn reverse_ip_hackertarget(ip: &str) -> Vec<String> {
     let url = format!("https://api.hackertarget.com/reverseiplookup/?q={}", ip);
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -138,6 +149,49 @@ async fn reverse_ip_lookup(ip: &str) -> Vec<String> {
                                 && domain_re.is_match(l)
                         })
                         .collect()
+                }
+                Err(_) => Vec::new(),
+            }
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+async fn reverse_ip_yougetsignal(ip: &str) -> Vec<String> {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    match client
+        .post("https://domains.yougetsignal.com/domains.php")
+        .header("User-Agent", "Mozilla/5.0")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!("remoteAddress={}&key=", ip))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                return Vec::new();
+            }
+            match resp.text().await {
+                Ok(body) => {
+                    let mut domains = Vec::new();
+                    // Response: {"domainArray":[["domain.com",""],...]}
+                    let domain_re = Regex::new(
+                        r#"\["([a-z0-9]([a-z0-9-]*[a-z0-9])?\.[a-z]{2,})""#
+                    ).unwrap();
+                    for cap in domain_re.captures_iter(&body) {
+                        let d = cap[1].to_string();
+                        if !domains.contains(&d) {
+                            domains.push(d);
+                        }
+                    }
+                    domains
                 }
                 Err(_) => Vec::new(),
             }

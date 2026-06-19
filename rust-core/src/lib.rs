@@ -48,6 +48,9 @@ pub struct ProfileConfig {
     /// Each entry should be a full Stalker portal URL like "http://iptvnow.nl/c/".
     #[serde(default)]
     pub fallback_portals: Vec<String>,
+    /// Whether background discovery has completed for this profile.
+    #[serde(default)]
+    pub discovery_done: bool,
 }
 
 impl Default for ProfileConfig {
@@ -73,6 +76,7 @@ impl Default for ProfileConfig {
             proxy_enabled: true,
             proxy_rewrite: true,
             fallback_portals: Vec::new(),
+            discovery_done: false,
         }
     }
 }
