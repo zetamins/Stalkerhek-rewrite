@@ -201,8 +201,64 @@ async fn proxy_handler(
                     ))
                     .unwrap();
             }
-            // get_ordered_list falls through to portal proxy — portal handles pagination correctly.
-            // The rewrite handler applies rename, dedup, and suffix stripping to the response.
+            "get_ordered_list" if query.r#type.as_deref() == Some("itv") => {
+                // Global dedup from local cache — no per-page repeats.
+                let genre_id = query.extra.get("genre").cloned().unwrap_or_default();
+                let p: usize = query.extra.get("p").and_then(|p| p.parse().ok()).unwrap_or(0);
+                let per_page: usize = 14;
+                let filter = st.filter.read().await;
+                let channels_guard = st.channels.read().await;
+                let mut seen = std::collections::HashSet::new();
+                let mut all_items: Vec<(stalker::Channel, String, u8)> = channels_guard.values()
+                    .filter(|ch| genre_id == "*" || genre_id.is_empty() || ch.genre_id == genre_id)
+                    .filter(|ch| filter.is_channel_allowed(st.profile_id, &ch.cmd, &ch.genre_id))
+                    .map(|ch| {
+                        let renamed = filter.apply_rename(st.profile_id, &ch.title);
+                        let rank = crate::hls::resolution_rank(&ch.title);
+                        (ch.clone(), renamed, rank)
+                    })
+                    .collect();
+                drop(channels_guard);
+                drop(filter);
+                // Sort by quality descending, then dedup by base name
+                all_items.sort_by_key(|(_, _, r)| -(*r as i32));
+                let mut deduped: Vec<serde_json::Value> = Vec::new();
+                for (ch, renamed, _) in &all_items {
+                    if renamed.starts_with('#') { continue; }
+                    let base = crate::hls::base_name(renamed);
+                    if seen.insert(base.clone()) {
+                        let ch_id = extract_stream_id(&ch.cmd);
+                        deduped.push(serde_json::json!({
+                            "id": ch_id,
+                            "name": base,
+                            "number": "0",
+                            "cmd": ch.cmd,
+                            "logo": ch.logo,
+                            "tv_genre_id": ch.genre_id,
+                            "use_http_tmp_link": "1",
+                            "use_load_balancing": "1",
+                            "cmds": [{"id": ch_id, "ch_id": ch.cmd_ch_id, "url": ch.cmd, "use_http_tmp_link": "1"}]
+                        }));
+                    }
+                }
+                let total = deduped.len();
+                let total_pages = if total > 0 { (total + per_page - 1) / per_page } else { 1 };
+                let start = (p * per_page).min(total);
+                let end = (start + per_page).min(total);
+                let page_items: Vec<serde_json::Value> = deduped[start..end].to_vec();
+                return Response::builder()
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&serde_json::json!({
+                        "js": {
+                            "total_items": total,
+                            "max_page_items": per_page,
+                            "cur_page": p,
+                            "data": page_items
+                        }
+                    })).unwrap()))
+                    .unwrap();
+            }
+            // VOD/series get_ordered_list falls through to portal proxy
             "get_all_channels" if query.r#type.as_deref() == Some("itv") => {
                 // Serve from local cache with rename, # filtering, and quality dedup.
                 let filter = st.filter.read().await;
