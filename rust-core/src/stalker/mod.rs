@@ -219,14 +219,14 @@ impl PortalClient {
     }
 
     /// Ensure the MAC address is a valid 12-digit hex string with colons.
-    /// If the input is a valid 12-digit hex string, we preserve it.
-    /// If it is shorter, we pad it with one of Infomir's real OUI prefixes.
-    /// Known Infomir OUIs used on MAG hardware: 00:1A:79, 00:1E:5F, 08:00:28, C8:2E:46
+    /// Uses LOWERCASE so the portal treats it as a different device from the
+    /// real STB (which uses uppercase). This enables simultaneous streaming
+    /// on the same account without per-MAC conflicts.
     fn repair_mac(mac: &str) -> String {
         let clean: String = mac.chars()
             .filter(|c| c.is_ascii_hexdigit())
             .collect::<String>()
-            .to_uppercase();
+            .to_lowercase();
 
         let final_mac = if clean.len() == 12 {
             clean
