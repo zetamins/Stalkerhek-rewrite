@@ -86,8 +86,6 @@ pub(crate) fn base_name(title: &str) -> String {
 pub struct HlsState {
     pub channels: Arc<RwLock<Vec<ChannelState>>>,
     pub channel_map: Arc<RwLock<HashMap<String, usize>>>,
-    /// base_name -> sorted list of full titles (highest quality first)
-    pub quality_chain: Arc<RwLock<HashMap<String, Vec<String>>>>,
     pub filter: Arc<RwLock<FilterStore>>,
     pub portal_client: Arc<RwLock<stalker::PortalClient>>,
     pub profile_id: i32,
@@ -122,26 +120,9 @@ pub fn build_router(
         ChannelState { info: ch }
     }).collect();
 
-    // Build quality chains: group channels by base name (without resolution tags),
-    // sorted by quality (highest first). Handles compound tags like "HEVC FHD".
-    let mut quality_chain: HashMap<String, Vec<String>> = HashMap::new();
-    for ch in channel_states.iter() {
-        let base = base_name(&ch.info.title);
-        if base != ch.info.title {
-            quality_chain.entry(base)
-                .or_default()
-                .push(ch.info.title.clone());
-        }
-    }
-    for titles in quality_chain.values_mut() {
-        titles.sort_by_key(|t| -(resolution_rank(t) as i32));
-        titles.dedup();
-    }
-
     let state = HlsState {
         channels: Arc::new(RwLock::new(channel_states)),
         channel_map: Arc::new(RwLock::new(channel_map)),
-        quality_chain: Arc::new(RwLock::new(quality_chain)),
         filter,
         portal_client,
         profile_id,
@@ -323,109 +304,57 @@ async fn channel_handler(
     let scheme = scheme_from_request(&req);
     let host = host_from_request(&req);
 
-    // Quality fallback: use the RAW title (with prefix) for quality-chain lookup.
-    // The chain is built from raw titles; display titles (no prefix) won't match.
-    let raw_title = {
-        let channels = st.channels.read().await;
-        channels[idx].info.title.clone()
-    };
-    let base = base_name(&raw_title);
-    let mut fallback_titles: Vec<String> = Vec::new();
-    fallback_titles.push(raw_title.clone());
-    if let Some(chain) = st.quality_chain.read().await.get(&base) {
-        for alt in chain {
-            if *alt != raw_title {
-                fallback_titles.push(alt.clone());
-            }
-        }
-    }
-
     // Direct CDN URLs (not through portal's /play/live.php) -- proxy directly.
     // Portal stream URLs (tres.4vps.info/play/live.php) -- use fetch_stream
     // which does create_link + get on same connection.
     if suffix.is_empty() {
-        for (attempt, try_title) in fallback_titles.iter().enumerate() {
-            // Lookup the channel index for this fallback title
-            let try_idx = {
-                let map = st.channel_map.read().await;
-                map.get(try_title).copied()
-            };
-            let try_idx = match try_idx {
-                Some(i) => i,
-                None => {
-                    let channels = st.channels.read().await;
-                    let filter = st.filter.read().await;
-                    match channels.iter().position(|c| {
-                        filter.apply_rename(st.profile_id, &c.info.title) == *try_title
-                    }) {
-                        Some(pos) => pos,
-                        None => continue,
-                    }
-                }
-            };
-            let (try_stream_url, try_cmd) = {
-                let channels = st.channels.read().await;
-                let ch = &channels[try_idx];
-                (ch.info.stream_url().to_string(), ch.info.cmd.clone())
-            };
-
-            if attempt > 0 {
-                tracing::info!("[HLS] quality fallback: trying {} (attempt {})", try_title, attempt + 1);
-            }
-
-            let is_direct_cdn = !try_stream_url.contains("/play/live.php");
-            if is_direct_cdn {
-                let stream_client = { st.portal_client.read().await.http_client().clone() };
-                let (_ip, tz) = crate::dns::get_sticky_european_identity(&host);
-                let target_url = try_stream_url.replacen("http://", "https://", 1);
-                match stream_client.get(&target_url)
-                    .header("User-Agent", format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 250 Mobile Safari/533.3", st.model))
-                    .header("Cookie", format!("PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};", st.serial_number, st.mac, tz))
-                    .header("Accept", "*/*")
-                    .send().await {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        if status.as_u16() >= 400 {
-                            tracing::warn!("[HLS] CDN fetch returned {} for {}: {}", status.as_u16(), try_title, target_url);
-                            continue;
+        let is_direct_cdn = !stream_url.contains("/play/live.php");
+        if is_direct_cdn {
+            let stream_client = { st.portal_client.read().await.http_client().clone() };
+            let (_ip, tz) = crate::dns::get_sticky_european_identity(&host);
+            let target_url = stream_url.replacen("http://", "https://", 1);
+            match stream_client.get(&target_url)
+                .header("User-Agent", format!("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) {} stbapp ver: 4 rev: 250 Mobile Safari/533.3", st.model))
+                .header("Cookie", format!("PHPSESSID=null; sn={}; mac={}; stb_lang=en; timezone={};", st.serial_number, st.mac, tz))
+                .header("Accept", "*/*")
+                .send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let headers = resp.headers().clone();
+                    let body = resp.bytes().await.unwrap_or_default();
+                    let body_str = String::from_utf8_lossy(&body);
+                    let rewritten = if body_str.starts_with("#EXTM3U") { rewrite_m3u8(&body_str, &scheme, &host, &title) } else { body_str.into_owned() };
+                    let mut response = Response::builder().status(status);
+                    for (k, v) in headers.iter() {
+                        let ks = k.as_str().to_lowercase();
+                        if !["host","connection","transfer-encoding","keep-alive","te","trailer","upgrade","content-encoding","content-length"].contains(&ks.as_str()) {
+                            response = response.header(k, v);
                         }
-                        let headers = resp.headers().clone();
-                        let body = resp.bytes().await.unwrap_or_default();
-                        let body_str = String::from_utf8_lossy(&body);
-                        let rewritten = if body_str.starts_with("#EXTM3U") { rewrite_m3u8(&body_str, &scheme, &host, try_title) } else { body_str.into_owned() };
-                        let mut response = Response::builder().status(status);
-                        for (k, v) in headers.iter() {
-                            let ks = k.as_str().to_lowercase();
-                            if !["host","connection","transfer-encoding","keep-alive","te","trailer","upgrade","content-encoding","content-length"].contains(&ks.as_str()) {
-                                response = response.header(k, v);
-                            }
-                        }
-                        return response.header("Access-Control-Allow-Origin", "*")
-                            .body(Body::from(rewritten)).unwrap();
                     }
-                    Err(e) => {
-                        tracing::warn!("[HLS] direct CDN fetch failed for {try_title}: {e}");
-                        continue;
-                    }
-                }
-            }
-            // Portal stream
-            let pc = st.portal_client.read().await;
-            match pc.fetch_stream(&try_cmd).await {
-                Ok((body_bytes, _upstream_headers)) => {
-                    return Response::builder()
-                        .status(200)
-                        .header("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8")
-                        .header("Access-Control-Allow-Origin", "*")
-                        .body(Body::from(body_bytes)).unwrap();
+                    return response.header("Access-Control-Allow-Origin", "*")
+                        .body(Body::from(rewritten)).unwrap();
                 }
                 Err(e) => {
-                    tracing::warn!("[HLS] fetch_stream failed for {try_title}: {e}");
-                    continue;
+                    tracing::warn!("[HLS] direct CDN fetch failed for {title}: {e}");
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
                 }
             }
         }
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        // Portal stream
+        let pc = st.portal_client.read().await;
+        match pc.fetch_stream(&cmd).await {
+            Ok((body_bytes, _upstream_headers)) => {
+                return Response::builder()
+                    .status(200)
+                    .header("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8")
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(Body::from(body_bytes)).unwrap();
+            }
+            Err(e) => {
+                tracing::error!("[HLS] fetch_stream failed for {title}: {e}");
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+        }
     }
     // TS segments: use cached stream_url with upgraded protocol
     let ts_url = upgrade_to_https(&if suffix.is_empty() { stream_url } else { format!("{}{}", get_hls_root_for_url(&stream_url), suffix) });
