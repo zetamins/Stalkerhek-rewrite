@@ -780,6 +780,10 @@ impl PortalClient {
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 tracing::info!("[HLS] portal returned HTTP {}", status);
+                if status == 458 || status == 444 {
+                    // Per-MAC streaming limit — propagate to caller for reborn
+                    return Err(format!("Portal HTTP {} (per-MAC limit)", status).into());
+                }
                 if status == 302 {
                     if let Some(loc) = resp.headers().get(reqwest::header::LOCATION) {
                         let redirect_url = loc.to_str().unwrap_or("").to_string();
