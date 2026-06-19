@@ -195,6 +195,7 @@ async fn create_profile(
     // Discovered portals update the profile asynchronously and persist to disk.
     if cfg.fallback_portals.is_empty() {
         let profiles_ref = st.profiles.clone();
+        let runners_ref = st.runners.clone();
         let data_dir = st.data_dir.clone();
         let profile_id = cfg.id;
         let portal_url = cfg.portal_url.clone();
@@ -207,12 +208,26 @@ async fn create_profile(
                     discover.all_portals.len(),
                     discover.best_portal
                 );
+                // Update profile config
                 let mut profiles = profiles_ref.write().await;
                 if let Some(p) = profiles.iter_mut().find(|p| p.id == profile_id) {
                     p.fallback_portals = discover.all_portals;
                     p.portal_url = discover.best_portal;
                     p.discovery_done = true;
                     save_profiles(&profiles, &data_dir);
+                }
+                // Update runner status so dashboard poll picks it up
+                let runners = runners_ref.read().await;
+                if let Some(r) = runners.iter().find(|r| r.config.id == profile_id) {
+                    let mut status = r.status.write().await;
+                    status.discovery_done = true;
+                }
+            } else {
+                // Mark done even on failure so UI stops waiting
+                let runners = runners_ref.read().await;
+                if let Some(r) = runners.iter().find(|r| r.config.id == profile_id) {
+                    let mut status = r.status.write().await;
+                    status.discovery_done = true;
                 }
             }
         });
@@ -553,6 +568,7 @@ pub async fn start_profile_by_id(
         hls_addr: format!(":{}", profile.hls_port),
         proxy_addr: format!(":{}", profile.proxy_port),
         running: true,
+        discovery_done: profile.discovery_done,
     }));
 
     let runner = ProfileRunner {

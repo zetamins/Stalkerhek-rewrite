@@ -105,6 +105,8 @@ pub struct ProfileStatus {
     pub hls_addr: String,
     pub proxy_addr: String,
     pub running: bool,
+    #[serde(default)]
+    pub discovery_done: bool,
 }
 
 impl Default for ProfileStatus {
@@ -117,6 +119,7 @@ impl Default for ProfileStatus {
             hls_addr: String::new(),
             proxy_addr: String::new(),
             running: false,
+            discovery_done: false,
         }
     }
 }
