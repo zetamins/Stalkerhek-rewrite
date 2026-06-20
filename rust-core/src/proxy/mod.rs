@@ -218,32 +218,6 @@ async fn proxy_handler(
                     ))
                     .unwrap();
             }
-            // Catch non-critical API requests locally — avoids burning upstream requests
-            // that often hit 429 rate limits during STBEmu startup.
-            "get_fav_ids" | "get_modules" | "get_active_recordings" => {
-                return Response::builder()
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"js":{"data":[]},"text":"generated in: 0.01s"}"#))
-                    .unwrap();
-            }
-            "get_epg_info" => {
-                return Response::builder()
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"js":{"data":{"epg":[]}},"text":"generated in: 0.01s"}"#))
-                    .unwrap();
-            }
-            "get_localization" => {
-                return Response::builder()
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"js":{"data":{"locales":["en_GB.utf8"]}},"text":"generated in: 0.01s"}"#))
-                    .unwrap();
-            }
-            "get_preload_images" => {
-                return Response::builder()
-                    .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"js":{"data":[]},"text":"generated in: 0.01s"}"#))
-                    .unwrap();
-            }
             // Serve get_ordered_list from local cache too — avoids 460+ upstream requests
             "get_ordered_list" if query.r#type.as_deref() == Some("itv") => {
                 let filter = st.filter.read().await;
@@ -704,6 +678,14 @@ async fn proxy_handler(
             Ok(resp) => {
                 let status = resp.status();
                 is_458 = status.as_u16() == 458;
+
+                // Upstream rate-limited — back off and retry
+                if status.as_u16() == 429 && hop < max_redirects {
+                    let delay = 500u64 * (hop as u64 + 1); // 500ms, 1s, 1.5s...
+                    tracing::warn!("[PROXY] upstream 429, retrying in {}ms", delay);
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    continue;
+                }
 
                 if status.is_redirection() && hop < max_redirects {
                     if let Some(location) = resp.headers().get(reqwest::header::LOCATION) {
