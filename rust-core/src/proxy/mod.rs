@@ -202,8 +202,89 @@ async fn proxy_handler(
                     ))
                     .unwrap();
             }
-            // get_ordered_list falls through to portal proxy
-            // VOD/series get_ordered_list falls through to portal proxy
+            // Serve get_ordered_list from local cache too — avoids 460+ upstream requests
+            "get_ordered_list" if query.r#type.as_deref() == Some("itv") => {
+                let filter = st.filter.read().await;
+                let channels_guard = st.channels.read().await;
+                let genre_filter: Option<String> = query.extra.iter()
+                    .find(|(k,_)| k.as_str() == "genre")
+                    .map(|(_,v)| v.clone());
+                let mut all_data: Vec<serde_json::Value> = channels_guard.values()
+                    .filter(|ch| {
+                        if let Some(ref g) = genre_filter {
+                            ch.genre_id == *g && filter.is_channel_allowed(st.profile_id, &ch.cmd, &ch.genre_id)
+                        } else {
+                            filter.is_channel_allowed(st.profile_id, &ch.cmd, &ch.genre_id)
+                        }
+                    })
+                    .enumerate()
+                    .map(|(i, ch)| {
+                        let ch_id = extract_stream_id(&ch.cmd);
+                        let renamed = filter.apply_rename(st.profile_id, &ch.title);
+                        serde_json::json!({
+                            "id": ch_id,
+                            "name": renamed,
+                            "number": (i + 1).to_string(),
+                            "cmd": ch.cmd,
+                            "logo": ch.logo,
+                            "tv_genre_id": ch.genre_id,
+                            "censored": "0",
+                            "cost": "0",
+                            "count": "0",
+                            "status": 1,
+                            "hd": 0,
+                            "base_ch": "0",
+                            "xmltv_id": "",
+                            "service_id": "",
+                            "use_http_tmp_link": "0",
+                            "use_load_balancing": "0",
+                            "wowza_tmp_link": "0",
+                            "wowza_dvr": "0",
+                            "enable_tv_archive": 0,
+                            "enable_wowza_load_balancing": "0",
+                            "monitoring_status": "1",
+                            "enable_monitoring": "0",
+                            "allow_pvr": 0,
+                            "allow_local_pvr": 0,
+                            "allow_local_timeshift": "1",
+                            "correct_time": "0",
+                            "nimble_dvr": "0",
+                            "volume_correction": "0",
+                            "mc_cmd": "",
+                            "bonus_ch": "0",
+                            "cmd_1": "",
+                            "cmd_2": "",
+                            "cmd_3": "",
+                            "modified": "",
+                            "nginx_secure_link": "0",
+                            "cmds": [{"id": ch_id, "url": ch.cmd, "use_http_tmp_link": "0"}]
+                        })
+                    })
+                    .collect();
+                drop(filter);
+                all_data.retain(|item| !item["name"].as_str().map_or(false, |n| n.starts_with('#')));
+                let total = all_data.len();
+                let page: usize = query.extra.iter().find(|(k,_)| k.as_str() == "p").and_then(|(_,v)| v.parse().ok()).unwrap_or(0);
+                let per_page: usize = 100; // Much larger than portal's 14 for speed
+                let start = total.min(page.saturating_mul(per_page));
+                let end = total.min(start + per_page);
+                let page_data: Vec<serde_json::Value> = if start < all_data.len() { all_data[start..end].to_vec() } else { Vec::new() };
+                let body = serde_json::to_string(&serde_json::json!({
+                    "js": {
+                        "total_items": total,
+                        "max_page_items": per_page,
+                        "data": page_data,
+                        "selected_item": 3,
+                        "cur_page": page
+                    }
+                })).unwrap_or_else(|_| r#"{"js":{"data":[]}}"#.into());
+                tracing::info!("[PROXY] get_ordered_list genre={:?} page={} → {} of {} channels, {} bytes", genre_filter, page, page_data.len(), total, body.len());
+                return Response::builder()
+                    .header("Content-Type", "application/json; charset=utf-8")
+                    .header("Content-Length", body.len())
+                    .body(Body::from(body))
+                    .unwrap();
+            }
             "get_all_channels" if query.r#type.as_deref() == Some("itv") => {
                 // Serve from local cache with rename, # filtering, and quality dedup.
                 let filter = st.filter.read().await;
