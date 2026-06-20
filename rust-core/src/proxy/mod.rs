@@ -208,7 +208,7 @@ async fn proxy_handler(
                 // Serve from local cache with rename, # filtering, and quality dedup.
                 let filter = st.filter.read().await;
                 let channels_guard = st.channels.read().await;
-                let mut data: Vec<serde_json::Value> = channels_guard.values()
+                let mut all_data: Vec<serde_json::Value> = channels_guard.values()
                     .filter(|ch| filter.is_channel_allowed(st.profile_id, &ch.cmd, &ch.genre_id))
                     .enumerate()
                     .map(|(i, ch)| {
@@ -229,13 +229,33 @@ async fn proxy_handler(
                     .collect();
                 drop(filter);
                 // Drop # separators only
-                data.retain(|item| {
+                all_data.retain(|item| {
                     !item["name"].as_str().map_or(false, |n| n.starts_with('#'))
                 });
+                let total = all_data.len();
+                // Paginate: Stalker uses 0-based page param `p`
+                let page: usize = query.extra.iter()
+                    .find(|(k,_)| k == "p")
+                    .and_then(|(_,v)| v.parse().ok())
+                    .unwrap_or(0);
+                let per_page: usize = query.extra.iter()
+                    .find(|(k,_)| k == "per_page")
+                    .and_then(|(_,v)| v.parse().ok())
+                    .unwrap_or(total.max(1));
+                let start = page.saturating_mul(per_page).min(total);
+                let end = (start + per_page).min(total);
+                let data: Vec<serde_json::Value> = all_data[start..end].to_vec();
+                let max_page_items = per_page.min(data.len().max(1));
                 return Response::builder()
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&serde_json::json!({
-                        "js": {"data": data}
+                        "js": {
+                            "total_items": total,
+                            "max_page_items": max_page_items,
+                            "data": data,
+                            "selected_item": 0_i32,
+                            "cur_page": page
+                        }
                     })).unwrap()))
                     .unwrap();
             }
@@ -407,9 +427,11 @@ async fn proxy_handler(
     }
 
     let request_path = uri.path();
-    // API requests (any path ending in .php with query params) go to portal.php.
-    // STBEmu uses /portal.php, TiviMate/others use /server/load.php — both are API calls.
-    let api_base = if !query_params.is_empty() {
+    // API requests go to /portal.php. STBEmu hits /portal.php directly,
+    // TiviMate and others use /server/load.php. Both are PHP endpoints.
+    // Static assets and root page go to portal_root.
+    let is_api = request_path.ends_with(".php") || !query_params.is_empty();
+    let api_base = if is_api {
         match url::Url::parse(&st.portal_base) {
             Ok(u) => {
                 format!("{}://{}/portal.php", u.scheme(), u.host_str().unwrap_or(""))
