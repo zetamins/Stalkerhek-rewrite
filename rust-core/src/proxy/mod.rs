@@ -144,12 +144,28 @@ async fn proxy_handler(
     method: Method,
     headers: HeaderMap,
     uri: Uri,
-    query: Query<ProxyQuery>,
+    mut query: Query<ProxyQuery>,
     body: axum::body::Bytes,
 ) -> Response {
     // Skip favicon -- not needed by STB
     if uri.path().contains("favicon") {
         return StatusCode::NOT_FOUND.into_response();
+    }
+    // Parse POST body for form fields (axum Query only reads URL params).
+    // cmd is special: its value is a URL containing &-separated query params.
+    // We extract everything after "cmd=" as the raw value.
+    let mut query = query;
+    if method == Method::POST && !body.is_empty() {
+        if let Ok(form_str) = std::str::from_utf8(&body) {
+            if let Some(cmd_pos) = form_str.find("cmd=") {
+                let cmd_raw = &form_str[cmd_pos + 4..]; // everything after "cmd="
+                if !cmd_raw.is_empty() && query.cmd.is_none() {
+                    // URL-decode: + → space, %xx → char
+                    let decoded = form_urldecode(cmd_raw);
+                    query.cmd = Some(decoded);
+                }
+            }
+        }
     }
     tracing::info!("[PROXY] {} -- action={:?} type={:?} cmd={:?}", uri, query.action, query.r#type, query.cmd);
     if let Some(action) = &query.action {
@@ -443,17 +459,23 @@ async fn proxy_handler(
                 if let Some(cmd) = &query.cmd {
                     let channel_data = {
                         let ch_guard = st.channels.read().await;
+                        let cache_size = ch_guard.len();
                         // Try exact match first
                         if let Some(ch) = ch_guard.get(cmd.as_str()) {
+                            tracing::info!("[PROXY] create_link cache HIT exact match");
                             Some(ch.clone())
                         } else {
                             // Fallback: match by stream ID extracted from cmd URL (e.g., "stream=691402")
                             let stream_id = extract_stream_id(cmd);
-                            ch_guard.values().find(|ch| {
+                            tracing::info!("[PROXY] create_link cache MISS cache_size={} stream_id={} cmd_len={}", cache_size, stream_id, cmd.len());
+                            let found = ch_guard.values().find(|ch| {
                                 if cmd == &ch.cmd { return true; }
                                 if !stream_id.is_empty() && ch.cmd.contains(&format!("stream={}", stream_id)) { return true; }
                                 false
-                            }).cloned()
+                            }).cloned();
+                            if found.is_some() { tracing::info!("[PROXY] create_link cache HIT via stream_id"); }
+                            else { tracing::warn!("[PROXY] create_link cache MISS after stream_id search"); }
+                            found
                         }
                     };
                     if let Some(channel) = channel_data {
@@ -507,7 +529,7 @@ async fn proxy_handler(
     let metrics_rewritten = crate::mag::scrub_metrics(&mut query_params, &st.serial_number, &st.mac);
 
     // Append remaining extra params, scrubbing STB-generated junk values
-    let handled = ["type", "action", "cmd", "sn", "device_id", "device_id2", "signature", "metrics"];
+    let handled = ["type", "action", "cmd", "sn", "device_id", "device_id2", "signature", "metrics", "JsHttpRequest"];
     // Override STB's MAC with the engine's registered MAC so the upstream portal
     // sees the subscribed identity regardless of what STBEmu is configured with.
     query_params.push(("mac".to_string(), st.mac.clone()));
@@ -574,10 +596,14 @@ async fn proxy_handler(
             format!("{}{}", st.portal_root, stripped)
         }
     } else {
-        let qs: Vec<String> = query_params.iter()
+        let mut qs: Vec<String> = query_params.iter()
             .map(|(k, v)| format!("{}={}", k, url_encode(v)))
             .collect();
-        format!("{}?{}&JsHttpRequest=1-xml", api_base, qs.join("&"))
+        // Only add JsHttpRequest to API calls (portal.php), not static assets
+        if is_api {
+            qs.push("JsHttpRequest=1-xml".to_string());
+        }
+        format!("{}?{}", api_base, qs.join("&"))
     };
 
     // Manual redirect loop -- preserve all headers (Authorization, Cookie) on every hop.
@@ -968,6 +994,24 @@ fn url_encode(s: &str) -> String {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
             _ => { out.push('%'); out.push_str(&format!("{:02X}", b)); }
+        }
+    }
+    out
+}
+
+fn form_urldecode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '+' {
+            out.push(' ');
+        } else if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                out.push(byte as char);
+            }
+        } else {
+            out.push(c);
         }
     }
     out
