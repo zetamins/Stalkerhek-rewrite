@@ -88,6 +88,7 @@ pub fn build_router(
     let portal_http_client = {
         let builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(300))
+            .pool_max_idle_per_host(50)
             .redirect(reqwest::redirect::Policy::none());
 
         let builder = stalker::PortalClient::configure_stealth_client(builder);
@@ -461,6 +462,7 @@ async fn proxy_handler(
         if !eur_ips.is_empty() {
             let mut builder = reqwest::Client::builder()
                 .timeout(Duration::from_secs(300))
+                .pool_max_idle_per_host(50)
                 .redirect(reqwest::redirect::Policy::none())
                 .resolve(&current_host, SocketAddr::new(eur_ips[0], current_port));
 
