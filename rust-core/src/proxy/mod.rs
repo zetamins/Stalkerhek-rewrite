@@ -497,7 +497,7 @@ async fn proxy_handler(
         let qs: Vec<String> = query_params.iter()
             .map(|(k, v)| format!("{}={}", k, url_encode(v)))
             .collect();
-        format!("{}?{}", api_base, qs.join("&"))
+        format!("{}?{}&JsHttpRequest=1-xml", api_base, qs.join("&"))
     };
 
     // Manual redirect loop -- preserve all headers (Authorization, Cookie) on every hop.
