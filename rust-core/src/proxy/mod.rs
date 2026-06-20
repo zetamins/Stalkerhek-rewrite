@@ -218,6 +218,32 @@ async fn proxy_handler(
                     ))
                     .unwrap();
             }
+            // Catch non-critical API requests locally — avoids burning upstream requests
+            // that often hit 429 rate limits during STBEmu startup.
+            "get_fav_ids" | "get_modules" | "get_active_recordings" => {
+                return Response::builder()
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"js":{"data":[]},"text":"generated in: 0.01s"}"#))
+                    .unwrap();
+            }
+            "get_epg_info" => {
+                return Response::builder()
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"js":{"data":{"epg":[]}},"text":"generated in: 0.01s"}"#))
+                    .unwrap();
+            }
+            "get_localization" => {
+                return Response::builder()
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"js":{"data":{"locales":["en_GB.utf8"]}},"text":"generated in: 0.01s"}"#))
+                    .unwrap();
+            }
+            "get_preload_images" => {
+                return Response::builder()
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"js":{"data":[]},"text":"generated in: 0.01s"}"#))
+                    .unwrap();
+            }
             // Serve get_ordered_list from local cache too — avoids 460+ upstream requests
             "get_ordered_list" if query.r#type.as_deref() == Some("itv") => {
                 let filter = st.filter.read().await;
