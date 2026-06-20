@@ -212,7 +212,6 @@ async fn create_profile(
                 let mut profiles = profiles_ref.write().await;
                 if let Some(p) = profiles.iter_mut().find(|p| p.id == profile_id) {
                     p.fallback_portals = discover.all_portals;
-                    p.portal_url = discover.best_portal;
                     p.discovery_done = true;
                     save_profiles(&profiles, &data_dir);
                 }
