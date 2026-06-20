@@ -407,13 +407,12 @@ async fn proxy_handler(
     }
 
     let request_path = uri.path();
-    // API requests go to /portal.php, not the portal base path (/c/)
-    let api_base = if request_path.starts_with("/portal.php") {
-        // Extract scheme+host from portal_base to build https://host/portal.php
+    // API requests (any path ending in .php with query params) go to portal.php.
+    // STBEmu uses /portal.php, TiviMate/others use /server/load.php — both are API calls.
+    let api_base = if !query_params.is_empty() {
         match url::Url::parse(&st.portal_base) {
             Ok(u) => {
-                let scheme = u.scheme();
-                format!("{}://{}/portal.php", scheme, u.host_str().unwrap_or(""))
+                format!("{}://{}/portal.php", u.scheme(), u.host_str().unwrap_or(""))
             }
             Err(_) => st.portal_base.clone()
         }
