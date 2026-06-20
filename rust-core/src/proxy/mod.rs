@@ -264,17 +264,30 @@ async fn proxy_handler(
                     !item["name"].as_str().map_or(false, |n| n.starts_with('#'))
                 });
                 let total = all_data.len();
+                // Paginate matching real portal: 14 items per page
+                let page: usize = query.extra.iter()
+                    .find(|(k,_)| k.as_str() == "p")
+                    .and_then(|(_,v)| v.parse().ok())
+                    .unwrap_or(0);
+                let per_page: usize = 14;
+                let start = total.min(page.saturating_mul(per_page));
+                let end = total.min(start + per_page);
+                let data: Vec<serde_json::Value> = if start < all_data.len() {
+                    all_data[start..end].to_vec()
+                } else {
+                    Vec::new()
+                };
                 let json = serde_json::json!({
                     "js": {
                         "total_items": total,
-                        "max_page_items": total,
-                        "data": all_data,
-                        "selected_item": 0,
-                        "cur_page": 0
+                        "max_page_items": 14,
+                        "selected_item": 3,
+                        "cur_page": page,
+                        "data": data
                     }
                 });
                 let body = serde_json::to_string(&json).unwrap_or_else(|_| r#"{"js":{"data":[]}}"#.into());
-                tracing::info!("[PROXY] get_all_channels → {} channels, {} bytes", total, body.len());
+                tracing::info!("[PROXY] get_all_channels page={} → {} of {} channels, {} bytes", page, data.len(), total, body.len());
                 return Response::builder()
                     .header("Content-Type", "application/json; charset=utf-8")
                     .header("Content-Length", body.len())
