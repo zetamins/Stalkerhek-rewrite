@@ -530,9 +530,12 @@ async fn proxy_handler(
 
     // Append remaining extra params, scrubbing STB-generated junk values
     let handled = ["type", "action", "cmd", "sn", "device_id", "device_id2", "signature", "metrics", "JsHttpRequest"];
-    // Override STB's MAC with the engine's registered MAC so the upstream portal
-    // sees the subscribed identity regardless of what STBEmu is configured with.
-    query_params.push(("mac".to_string(), st.mac.clone()));
+    // Only add MAC override for API requests. Don't add to static files —
+    // the upstream portal's nginx may crash on ?mac= appended to .js/.css.
+    let is_api = uri.path().ends_with(".php") || query.r#type.is_some() || query.action.is_some();
+    if is_api {
+        query_params.push(("mac".to_string(), st.mac.clone()));
+    }
     // Parameters that the engine provides correct values for (override STB's undefined/null/empty)
     let engine_overrides: &[(&str, &str)] = &[
         ("stb_type", &st.model),
@@ -564,13 +567,8 @@ async fn proxy_handler(
     }
 
     let request_path = uri.path();
-    // API requests go to /portal.php. STBEmu uses /portal.php directly,
-    // TiviMate uses /server/load.php. Static assets use portal_root.
-    // Check the ORIGINAL query for API markers (type/action), not the
-    // proxy-built query_params (which includes MAC on every request).
-    let is_api = request_path.ends_with(".php")
-        || query.r#type.is_some()
-        || query.action.is_some();
+    // API requests go to /portal.php. Static assets go to portal_root.
+    // is_api is computed above (checks .php path, type, action).
     let api_base = if is_api {
         match url::Url::parse(&st.portal_base) {
             Ok(u) => {
