@@ -372,6 +372,9 @@ async fn proxy_handler(
 
     // Append remaining extra params, scrubbing STB-generated junk values
     let handled = ["type", "action", "cmd", "sn", "device_id", "device_id2", "signature", "metrics"];
+    // Override STB's MAC with the engine's registered MAC so the upstream portal
+    // sees the subscribed identity regardless of what STBEmu is configured with.
+    query_params.push(("mac".to_string(), st.mac.clone()));
     // Parameters that the engine provides correct values for (override STB's undefined/null/empty)
     let engine_overrides: &[(&str, &str)] = &[
         ("stb_type", &st.model),
