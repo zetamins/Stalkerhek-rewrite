@@ -627,10 +627,18 @@ async fn profile_status(
         let status = runner.status.read().await;
         Json(serde_json::to_value(&*status).unwrap_or_default())
     } else {
+        let profiles = st.profiles.read().await;
+        let discovery_done = profiles
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.discovery_done)
+            .unwrap_or(true);
         Json(serde_json::json!({
+            "id": id,
             "phase": "idle",
             "message": "Not running",
-            "running": false
+            "running": false,
+            "discovery_done": discovery_done
         }))
     }
 }

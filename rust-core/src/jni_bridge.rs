@@ -265,10 +265,19 @@ pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeGetPr
             let status = runner.status.read().await;
             serde_json::to_string(&*status).unwrap_or_default()
         } else {
+            // Profile not running — include discovery_done from config so dashboard can show spinner
+            let profiles = engine.state.profiles.read().await;
+            let discovery_done = profiles
+                .iter()
+                .find(|p| p.id == profile_id)
+                .map(|p| p.discovery_done)
+                .unwrap_or(true); // unknown profile → assume done
             serde_json::json!({
+                "id": profile_id,
                 "phase": "idle",
                 "message": "Not running",
-                "running": false
+                "running": false,
+                "discovery_done": discovery_done
             })
             .to_string()
         }
