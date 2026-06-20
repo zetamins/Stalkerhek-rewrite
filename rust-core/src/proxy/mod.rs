@@ -265,14 +265,13 @@ async fn proxy_handler(
                 all_data.retain(|item| !item["name"].as_str().map_or(false, |n| n.starts_with('#')));
                 let total = all_data.len();
                 let page: usize = query.extra.iter().find(|(k,_)| k.as_str() == "p").and_then(|(_,v)| v.parse().ok()).unwrap_or(0);
-                let per_page: usize = 14; // Match real portal — TiviMate calculates pages from this
-                let start = total.min(page.saturating_mul(per_page));
-                let end = total.min(start + per_page);
-                let page_data: Vec<serde_json::Value> = if start < all_data.len() { all_data[start..end].to_vec() } else { Vec::new() };
+                // Serve entire genre in one response from local cache
+                let _per_page = total.max(1);
+                let page_data = all_data.clone();
                 let body = serde_json::to_string(&serde_json::json!({
                     "js": {
                         "total_items": total,
-                        "max_page_items": per_page,
+                        "max_page_items": total.max(1),
                         "data": page_data,
                         "selected_item": 3,
                         "cur_page": page
