@@ -14,7 +14,18 @@ pub struct DiscoverResult {
 
 const KNOWN_SUBNETS: &[&str] = &["103.176.90", "185.245.0"];
 
+/// Discover portals without MAC validation (for the public /api/v1/discover endpoint).
 pub async fn discover_portals(portal_url: &str) -> DiscoverResult {
+    discover_portals_inner(portal_url, None).await
+}
+
+/// Discover portals and validate that the given MAC has an active subscription (channels > 0).
+/// Used when creating a profile — only promotes a portal if the user can actually use it.
+pub async fn discover_portals_with_mac(portal_url: &str, mac: &str) -> DiscoverResult {
+    discover_portals_inner(portal_url, Some(mac)).await
+}
+
+async fn discover_portals_inner(portal_url: &str, mac: Option<&str>) -> DiscoverResult {
     let mut domain_portals: Vec<(String, f64)> = Vec::new();
     let mut ip_fallback: Vec<(String, f64)> = Vec::new();
 
@@ -33,7 +44,7 @@ pub async fn discover_portals(portal_url: &str) -> DiscoverResult {
 
                     if is_cf {
                         tracing::info!("[discover] {} is Cloudflare — scanning known subnets", host);
-                        discover_from_subnets(KNOWN_SUBNETS, &mut domain_portals, &mut ip_fallback).await;
+                        discover_from_subnets(KNOWN_SUBNETS, &mut domain_portals, &mut ip_fallback, mac).await;
                         break;
                     }
 
@@ -42,11 +53,11 @@ pub async fn discover_portals(portal_url: &str) -> DiscoverResult {
                     let domains = reverse_ip_lookup(&v4.to_string()).await;
                     if !domains.is_empty() {
                         tracing::info!("[discover] {} domains found via reverse-IP", domains.len());
-                        test_domains(&domains, &mut domain_portals).await;
+                        test_domains(&domains, &mut domain_portals, mac).await;
                     }
                     // Also scan subnet for neighboring IPs
                     let subnet = format!("{}.{}.{}", octets[0], octets[1], octets[2]);
-                    discover_from_subnets(&[&subnet], &mut domain_portals, &mut ip_fallback).await;
+                    discover_from_subnets(&[&subnet], &mut domain_portals, &mut ip_fallback, mac).await;
                     break;
                 }
             }
@@ -55,7 +66,7 @@ pub async fn discover_portals(portal_url: &str) -> DiscoverResult {
 
     // Fallback: scan known subnets
     if domain_portals.is_empty() {
-        discover_from_subnets(KNOWN_SUBNETS, &mut domain_portals, &mut ip_fallback).await;
+        discover_from_subnets(KNOWN_SUBNETS, &mut domain_portals, &mut ip_fallback, mac).await;
     }
 
     // Prefer domain portals over bare IPs. Only use IPs if no domains found.
@@ -83,6 +94,7 @@ async fn discover_from_subnets(
     subnets: &[&str],
     domain_portals: &mut Vec<(String, f64)>,
     ip_fallback: &mut Vec<(String, f64)>,
+    mac: Option<&str>,
 ) {
     for subnet in subnets {
         let mut found = Vec::new();
@@ -95,7 +107,7 @@ async fn discover_from_subnets(
         let domains = reverse_ip_lookup(sample_ip).await;
         if !domains.is_empty() {
             tracing::info!("[discover] subnet {} → {} domains, testing...", subnet, domains.len());
-            test_domains(&domains, domain_portals).await;
+            test_domains(&domains, domain_portals, mac).await;
         }
         // Only use IP fallback if no domains at all
         if domain_portals.is_empty() {
@@ -201,7 +213,8 @@ async fn reverse_ip_yougetsignal(ip: &str) -> Vec<String> {
 }
 
 /// Test a batch of domains in parallel — check Stalker markers + no Cloudflare + handshake.
-async fn test_domains(domains: &[String], results: &mut Vec<(String, f64)>) {
+/// If `mac` is provided, also verify that the MAC has channel access on this portal.
+async fn test_domains(domains: &[String], results: &mut Vec<(String, f64)>, mac: Option<&str>) {
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .build()
@@ -214,6 +227,7 @@ async fn test_domains(domains: &[String], results: &mut Vec<(String, f64)>) {
     for domain in domains {
         let c = client.clone();
         let d = domain.clone();
+        let mac = mac.map(|m| m.to_string());
         handles.push(tokio::spawn(async move {
             let url = format!("http://{}/c/", d);
             let start = std::time::Instant::now();
@@ -233,11 +247,19 @@ async fn test_domains(domains: &[String], results: &mut Vec<(String, f64)>) {
                                     || body.contains("stb.")
                                     || body.contains("portal"))
                             {
-                                // Verify with handshake
-                                if test_handshake_url(&format!("http://{}:80", d)).await {
-                                    let elapsed = start.elapsed().as_secs_f64();
-                                    return Some((format!("http://{}:80", d), elapsed));
+                                let base = format!("http://{}:80", d);
+                                // Verify handshake
+                                if !test_handshake_url(&base).await {
+                                    return None;
                                 }
+                                // If MAC provided, verify it has channel access
+                                if let Some(ref m) = mac {
+                                    if !test_channel_access(&base, m).await {
+                                        return None;
+                                    }
+                                }
+                                let elapsed = start.elapsed().as_secs_f64();
+                                return Some((base, elapsed));
                             }
                         }
                     }
@@ -359,4 +381,58 @@ async fn test_handshake_url(base_url: &str) -> bool {
         }
     }
     false
+}
+
+/// Check if a MAC has an active subscription on this portal (returns channels > 0).
+/// Lightweight: requests page 1 with per_page=1, just need to know if any exist.
+async fn test_channel_access(base_url: &str, mac: &str) -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let url = format!(
+        "{}/c/portal.php?type=itv&action=get_all_channels&JsHttpRequest=1-xml",
+        base_url
+    );
+    match client
+        .post(&url)
+        .header("User-Agent", "MAG254")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "mac={}&sn=0000000000000&stb_type=MAG254&auth_second_step=1&hd=1&not_valid_token=1",
+            mac
+        ))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                return false;
+            }
+            match resp.text().await {
+                Ok(body) => {
+                    // Parse: either {"js":{"data":[...]}} or {"js":[...]}
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
+                        if let Some(js) = parsed.get("js") {
+                            let count = if let Some(data) = js.get("data") {
+                                data.as_array().map(|a| a.len()).unwrap_or(0)
+                            } else if let Some(arr) = js.as_array() {
+                                arr.len()
+                            } else {
+                                0
+                            };
+                            return count > 0;
+                        }
+                    }
+                    false
+                }
+                Err(_) => false,
+            }
+        }
+        Err(_) => false,
+    }
 }

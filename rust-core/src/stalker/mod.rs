@@ -561,10 +561,6 @@ impl PortalClient {
         let genres = self.get_genres().await.unwrap_or_default();
 
         #[derive(Deserialize)]
-        struct ChJs {
-            data: Vec<ChData>,
-        }
-        #[derive(Deserialize)]
         struct ChData {
             name: String,
             cmd: String,
@@ -579,12 +575,26 @@ impl PortalClient {
 
         let parsed: Wrapper = serde_json::from_str(&text)?;
         let js_val = parsed.js;
-        if js_val.is_null() || js_val.is_array() {
-            return Err("No channel data returned".into());
-        }
-        let payload: ChJs = serde_json::from_value(js_val)?;
+        // Handle two Stalker response formats:
+        // Format A: {"js":{"data":[...]}}  — most portals
+        // Format B: {"js":[...]}           — some older/alternate portals
+        let data: Vec<ChData> = match js_val {
+            serde_json::Value::Object(map) => {
+                // Format A: js is an object, data key holds the array
+                if let Some(data_val) = map.get("data").cloned() {
+                    serde_json::from_value(data_val)?
+                } else {
+                    return Err("Missing data in channel response".into());
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                // Format B: js is directly a list of channels
+                serde_json::from_value(serde_json::Value::Array(arr))?
+            }
+            _ => return Err("Unexpected channel response format".into()),
+        };
 
-        let channels: Vec<Channel> = payload.data.into_iter().map(|d| {
+        let channels: Vec<Channel> = data.into_iter().map(|d| {
             let (cmd_id, cmd_ch_id) = match d.cmds.as_ref().and_then(|c| c.first()) {
                 Some(cmd) => (
                     cmd.id.clone().unwrap_or_default(),

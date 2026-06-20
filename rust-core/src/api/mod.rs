@@ -198,9 +198,10 @@ async fn create_profile(
         let runners_ref = st.runners.clone();
         let data_dir = st.data_dir.clone();
         let profile_id = cfg.id;
+        let mac = cfg.mac.clone();
         let portal_url = cfg.portal_url.clone();
         tokio::spawn(async move {
-            let discover = crate::discover::discover_portals(&portal_url).await;
+            let discover = crate::discover::discover_portals_with_mac(&portal_url, &mac).await;
             if discover.discovered {
                 tracing::info!(
                     "[discover] profile {}: found {} portals, best: {}",
@@ -212,6 +213,7 @@ async fn create_profile(
                 let mut profiles = profiles_ref.write().await;
                 if let Some(p) = profiles.iter_mut().find(|p| p.id == profile_id) {
                     p.fallback_portals = discover.all_portals;
+                    p.portal_url = discover.best_portal;
                     p.discovery_done = true;
                     save_profiles(&profiles, &data_dir);
                 }

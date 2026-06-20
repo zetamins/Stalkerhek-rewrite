@@ -399,7 +399,7 @@ pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeCreat
     };
 
     let engine = get_engine();
-    let (profiles_ref, runners_ref, data_dir, profile_id, portal_url, has_fallbacks) =
+    let (profiles_ref, runners_ref, data_dir, profile_id, portal_url, mac, has_fallbacks) =
         engine.runtime.block_on(async {
             let mut profiles = engine.state.profiles.write().await;
             // Upsert
@@ -415,6 +415,7 @@ pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeCreat
                 engine.data_dir.clone(),
                 profile.id,
                 profile.portal_url.clone(),
+                profile.mac.clone(),
                 profile.fallback_portals.is_empty(),
             )
         });
@@ -422,7 +423,7 @@ pub extern "system" fn Java_com_streamhek_tv_engine_RustEngineBridge_nativeCreat
     // Spawn background discovery (same as HTTP create_profile path)
     if has_fallbacks {
         engine.runtime.spawn(async move {
-            let discover = crate::discover::discover_portals(&portal_url).await;
+            let discover = crate::discover::discover_portals_with_mac(&portal_url, &mac).await;
             if discover.discovered {
                 tracing::info!(
                     "[discover JNI] profile {}: found {} portals, best: {}",
