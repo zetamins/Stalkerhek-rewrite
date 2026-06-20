@@ -221,9 +221,40 @@ async fn proxy_handler(
                             "cmd": ch.cmd,
                             "logo": ch.logo,
                             "tv_genre_id": ch.genre_id,
-                            "use_http_tmp_link": "1",
-                            "use_load_balancing": "1",
-                            "cmds": [{"id": ch_id, "ch_id": ch.cmd_ch_id, "url": ch.cmd, "use_http_tmp_link": "1"}]
+                            "censored": "0",
+                            "cost": "0",
+                            "count": "0",
+                            "status": 1,
+                            "hd": 0,
+                            "base_ch": "0",
+                            "xmltv_id": "",
+                            "service_id": "",
+                            "use_http_tmp_link": "0",
+                            "use_load_balancing": "0",
+                            "wowza_tmp_link": "0",
+                            "wowza_dvr": "0",
+                            "enable_tv_archive": 0,
+                            "enable_wowza_load_balancing": "0",
+                            "monitoring_status": "1",
+                            "enable_monitoring": "0",
+                            "allow_pvr": 0,
+                            "allow_local_pvr": 0,
+                            "allow_local_timeshift": "1",
+                            "correct_time": "0",
+                            "nimble_dvr": "0",
+                            "volume_correction": "0",
+                            "mc_cmd": "",
+                            "bonus_ch": "0",
+                            "cmd_1": "",
+                            "cmd_2": "",
+                            "cmd_3": "",
+                            "modified": "",
+                            "nginx_secure_link": "0",
+                            "cmds": [{
+                                "id": ch_id,
+                                "url": ch.cmd,
+                                "use_http_tmp_link": "0"
+                            }]
                         })
                     })
                     .collect();
