@@ -119,13 +119,24 @@ async fn discover_from_subnets(
 /// Query reverse-IP providers for all domains hosted on an IP.
 /// Falls back through multiple providers.
 async fn reverse_ip_lookup(ip: &str) -> Vec<String> {
-    // Provider 1: hackertarget (most comprehensive, free, but rate-limited)
-    let domains = reverse_ip_hackertarget(ip).await;
-    if !domains.is_empty() {
-        return domains;
+    // Try the given IP first, then fall back to known-good IPs on the same subnet
+    let candidates = [ip.to_string(), format!("{}.144", subnet_of(ip)), format!("{}.1", subnet_of(ip))];
+    for candidate in &candidates {
+        let domains = reverse_ip_hackertarget(candidate).await;
+        if !domains.is_empty() {
+            return domains;
+        }
     }
     // Provider 2: yougetsignal (free, no key, limited results)
     reverse_ip_yougetsignal(ip).await
+}
+
+/// Extract the /24 prefix from an IP like "103.176.90.139" → "103.176.90"
+fn subnet_of(ip: &str) -> &str {
+    match ip.rfind('.') {
+        Some(pos) => &ip[..pos],
+        None => ip,
+    }
 }
 
 async fn reverse_ip_hackertarget(ip: &str) -> Vec<String> {
@@ -217,6 +228,7 @@ async fn reverse_ip_yougetsignal(ip: &str) -> Vec<String> {
 async fn test_domains(domains: &[String], results: &mut Vec<(String, f64)>, mac: Option<&str>) {
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
+        .pool_max_idle_per_host(200)
         .build()
     {
         Ok(c) => c,
@@ -388,6 +400,7 @@ async fn test_handshake_url(base_url: &str) -> bool {
 async fn test_channel_access(base_url: &str, mac: &str) -> bool {
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
+        .pool_max_idle_per_host(200)
         .build()
     {
         Ok(c) => c,
