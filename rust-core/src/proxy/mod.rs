@@ -265,7 +265,7 @@ async fn proxy_handler(
                 all_data.retain(|item| !item["name"].as_str().map_or(false, |n| n.starts_with('#')));
                 let total = all_data.len();
                 let page: usize = query.extra.iter().find(|(k,_)| k.as_str() == "p").and_then(|(_,v)| v.parse().ok()).unwrap_or(0);
-                let per_page: usize = 100; // Much larger than portal's 14 for speed
+                let per_page: usize = 14; // Match real portal — TiviMate calculates pages from this
                 let start = total.min(page.saturating_mul(per_page));
                 let end = total.min(start + per_page);
                 let page_data: Vec<serde_json::Value> = if start < all_data.len() { all_data[start..end].to_vec() } else { Vec::new() };
