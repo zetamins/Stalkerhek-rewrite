@@ -537,7 +537,12 @@ async fn proxy_handler(
                 break;
             }
             Err(e) => {
-                tracing::error!("Proxy upstream error at hop {hop}: {e}");
+                tracing::warn!("Proxy upstream error at hop {hop}: {e}, retrying...");
+                if hop < max_redirects {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+                tracing::error!("Proxy upstream error after {} retries: {e}", max_redirects);
                 return StatusCode::BAD_GATEWAY.into_response();
             }
         }
