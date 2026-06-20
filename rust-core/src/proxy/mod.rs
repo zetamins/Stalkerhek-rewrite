@@ -235,17 +235,21 @@ async fn proxy_handler(
                 let total = all_data.len();
                 // Paginate: Stalker uses 0-based page param `p`
                 let page: usize = query.extra.iter()
-                    .find(|(k,_)| k == "p")
+                    .find(|(k,_)| k.as_str() == "p")
                     .and_then(|(_,v)| v.parse().ok())
                     .unwrap_or(0);
                 let per_page: usize = query.extra.iter()
-                    .find(|(k,_)| k == "per_page")
+                    .find(|(k,_)| k.as_str() == "per_page")
                     .and_then(|(_,v)| v.parse().ok())
-                    .unwrap_or(total.max(1));
-                let start = page.saturating_mul(per_page).min(total);
-                let end = (start + per_page).min(total);
-                let data: Vec<serde_json::Value> = all_data[start..end].to_vec();
-                let max_page_items = per_page.min(data.len().max(1));
+                    .unwrap_or(usize::MAX);
+                let start = page.saturating_mul(per_page);
+                let end = if start < total { std::cmp::min(start + per_page, total) } else { total };
+                let data: Vec<serde_json::Value> = if start < all_data.len() {
+                    all_data[start..end].to_vec()
+                } else {
+                    Vec::new()
+                };
+                let max_page_items: usize = per_page;
                 return Response::builder()
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&serde_json::json!({
