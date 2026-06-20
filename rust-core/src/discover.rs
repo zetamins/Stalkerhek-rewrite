@@ -262,14 +262,17 @@ async fn test_domains(domains: &[String], results: &mut Vec<(String, f64)>, mac:
                                 let base = format!("http://{}:80", d);
                                 // Verify handshake
                                 if !test_handshake_url(&base).await {
+                                    tracing::debug!("[discover] {d} failed handshake");
                                     return None;
                                 }
                                 // If MAC provided, verify it has channel access
                                 if let Some(ref m) = mac {
                                     if !test_channel_access(&base, m).await {
+                                        tracing::debug!("[discover] {d} failed channel access for {m}");
                                         return None;
                                     }
                                 }
+                                tracing::debug!("[discover] {d} PASSED all checks");
                                 let elapsed = start.elapsed().as_secs_f64();
                                 return Some((base, elapsed));
                             }
@@ -396,10 +399,10 @@ async fn test_handshake_url(base_url: &str) -> bool {
 }
 
 /// Check if a MAC has an active subscription on this portal (returns channels > 0).
-/// Lightweight: requests page 1 with per_page=1, just need to know if any exist.
+/// Requests page 1 with per_page=1 to minimise data transfer across many concurrent checks.
 async fn test_channel_access(base_url: &str, mac: &str) -> bool {
     let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(15))
         .pool_max_idle_per_host(200)
         .build()
     {
@@ -408,7 +411,7 @@ async fn test_channel_access(base_url: &str, mac: &str) -> bool {
     };
 
     let url = format!(
-        "{}/c/portal.php?type=itv&action=get_all_channels&JsHttpRequest=1-xml",
+        "{}/c/portal.php?type=itv&action=get_all_channels&JsHttpRequest=1-xml&p=0&per_page=1",
         base_url
     );
     match client
@@ -428,7 +431,6 @@ async fn test_channel_access(base_url: &str, mac: &str) -> bool {
             }
             match resp.text().await {
                 Ok(body) => {
-                    // Parse: either {"js":{"data":[...]}} or {"js":[...]}
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
                         if let Some(js) = parsed.get("js") {
                             let count = if let Some(data) = js.get("data") {
