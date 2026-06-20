@@ -233,32 +233,15 @@ async fn proxy_handler(
                     !item["name"].as_str().map_or(false, |n| n.starts_with('#'))
                 });
                 let total = all_data.len();
-                // Paginate: Stalker uses 0-based page param `p`
-                let page: usize = query.extra.iter()
-                    .find(|(k,_)| k.as_str() == "p")
-                    .and_then(|(_,v)| v.parse().ok())
-                    .unwrap_or(0);
-                let per_page: usize = query.extra.iter()
-                    .find(|(k,_)| k.as_str() == "per_page")
-                    .and_then(|(_,v)| v.parse().ok())
-                    .unwrap_or(usize::MAX);
-                let start = page.saturating_mul(per_page);
-                let end = if start < total { std::cmp::min(start + per_page, total) } else { total };
-                let data: Vec<serde_json::Value> = if start < all_data.len() {
-                    all_data[start..end].to_vec()
-                } else {
-                    Vec::new()
-                };
-                let max_page_items: usize = per_page;
                 return Response::builder()
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&serde_json::json!({
                         "js": {
                             "total_items": total,
-                            "max_page_items": max_page_items,
-                            "data": data,
+                            "max_page_items": total,
+                            "data": all_data,
                             "selected_item": 0_i32,
-                            "cur_page": page
+                            "cur_page": 0_i32
                         }
                     })).unwrap()))
                     .unwrap();
