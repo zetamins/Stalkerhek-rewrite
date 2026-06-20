@@ -777,44 +777,49 @@ impl PortalClient {
                 // Send Shadow Ghost watchdog (cur_play_type=0) to kill STB's stream slot,
                 // then retry with the slot freed.
                 if status == 458 || status == 444 {
-                    let _ = self.clone_for_watchdog().release_stream_slot().await;
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    if let Ok(retry) = portal_client.get(&m3u8_url)
-                        .header("User-Agent", "MAG254")
-                        .send().await
-                    {
-                        status = retry.status().as_u16();
-                        tracing::info!("[HLS] portal 458 retry → HTTP {}", status);
-                        if status == 302 {
-                            // Process the retry response below as if first attempt
-                            if let Some(loc) = retry.headers().get(reqwest::header::LOCATION) {
-                                let redirect_url = loc.to_str().unwrap_or("").to_string();
-                                let streamer_base = match url::Url::parse(&redirect_url) {
-                                    Ok(u) => format!("{}://{}", u.scheme(), u.host_str().unwrap_or("")),
-                                    Err(_) => redirect_url.clone(),
-                                };
-                                let red_client = reqwest::Client::builder()
-                                    .redirect(reqwest::redirect::Policy::none())
-                                    .timeout(std::time::Duration::from_secs(60))
-                                    .build()?;
-                                if let Ok(red_resp) = red_client.get(&redirect_url)
-                                    .header("User-Agent", "MAG254")
-                                    .send().await
-                                {
-                                    let playlist_body = red_resp.bytes().await?.to_vec();
-                                    if !playlist_body.is_empty() && playlist_body.starts_with(b"#EXTM3U") {
-                                        let rewritten = Self::rewrite_hls_segments(&playlist_body, &streamer_base);
-                                        let mut headers = reqwest::header::HeaderMap::new();
-                                        headers.insert(reqwest::header::CONTENT_TYPE,
-                                            reqwest::header::HeaderValue::from_static("application/vnd.apple.mpegurl"));
-                                        tracing::info!("[HLS] portal 458 retry OK: {} bytes", rewritten.len());
-                                        return Ok((rewritten.into_bytes(), headers));
+                    // Shadow Ghost: send release-stream watchdog multiple times
+                    // with increasing delays to outrace the STB's keep-alive watchdog.
+                    let delays = [1_u64, 2, 3, 5]; // seconds
+                    for (attempt, delay) in delays.iter().enumerate() {
+                        let _ = self.clone_for_watchdog().release_stream_slot().await;
+                        tokio::time::sleep(std::time::Duration::from_secs(*delay)).await;
+                        if let Ok(retry) = portal_client.get(&m3u8_url)
+                            .header("User-Agent", "MAG254")
+                            .send().await
+                        {
+                            status = retry.status().as_u16();
+                            tracing::info!("[HLS] portal 458 retry {}/{} → HTTP {}", attempt + 1, delays.len(), status);
+                            if status == 302 {
+                                if let Some(loc) = retry.headers().get(reqwest::header::LOCATION) {
+                                    let redirect_url = loc.to_str().unwrap_or("").to_string();
+                                    let streamer_base = match url::Url::parse(&redirect_url) {
+                                        Ok(u) => format!("{}://{}", u.scheme(), u.host_str().unwrap_or("")),
+                                        Err(_) => redirect_url.clone(),
+                                    };
+                                    let red_client = reqwest::Client::builder()
+                                        .redirect(reqwest::redirect::Policy::none())
+                                        .timeout(std::time::Duration::from_secs(60))
+                                        .build()?;
+                                    if let Ok(red_resp) = red_client.get(&redirect_url)
+                                        .header("User-Agent", "MAG254")
+                                        .send().await
+                                    {
+                                        let playlist_body = red_resp.bytes().await?.to_vec();
+                                        if !playlist_body.is_empty() && playlist_body.starts_with(b"#EXTM3U") {
+                                            let rewritten = Self::rewrite_hls_segments(&playlist_body, &streamer_base);
+                                            let mut headers = reqwest::header::HeaderMap::new();
+                                            headers.insert(reqwest::header::CONTENT_TYPE,
+                                                reqwest::header::HeaderValue::from_static("application/vnd.apple.mpegurl"));
+                                            tracing::info!("[HLS] portal 458 retry OK: {} bytes (attempt {})", rewritten.len(), attempt + 1);
+                                            return Ok((rewritten.into_bytes(), headers));
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                    return Err(format!("Portal HTTP {} (per-MAC limit, retry failed)", status).into());
+                    tracing::error!("[HLS] portal 458: all {} retries failed", delays.len());
+                    return Err(format!("Portal HTTP 458 after {} retries", delays.len()).into());
                 }
                 if status == 302 {
                     if let Some(loc) = resp.headers().get(reqwest::header::LOCATION) {
