@@ -233,15 +233,28 @@ async fn proxy_handler(
                     !item["name"].as_str().map_or(false, |n| n.starts_with('#'))
                 });
                 let total = all_data.len();
+                let page: usize = query.extra.iter()
+                    .find(|(k,_)| k.as_str() == "p")
+                    .and_then(|(_,v)| v.parse().ok())
+                    .unwrap_or(0);
+                let per_page: usize = 14; // Match real Stalker portal default
+                let max_page_items = if total > 0 { per_page } else { 0 };
+                let start = total.min(page.saturating_mul(per_page));
+                let end = total.min(start + per_page);
+                let data: Vec<serde_json::Value> = if start < all_data.len() {
+                    all_data[start..end].to_vec()
+                } else {
+                    Vec::new()
+                };
                 return Response::builder()
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_string(&serde_json::json!({
                         "js": {
                             "total_items": total,
-                            "max_page_items": total,
-                            "data": all_data,
+                            "max_page_items": max_page_items,
+                            "data": data,
                             "selected_item": 0_i32,
-                            "cur_page": 0_i32
+                            "cur_page": page
                         }
                     })).unwrap()))
                     .unwrap();
