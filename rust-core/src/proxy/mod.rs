@@ -414,10 +414,13 @@ async fn proxy_handler(
     }
 
     let request_path = uri.path();
-    // API requests go to /portal.php. STBEmu hits /portal.php directly,
-    // TiviMate and others use /server/load.php. Both are PHP endpoints.
-    // Static assets and root page go to portal_root.
-    let is_api = request_path.ends_with(".php") || !query_params.is_empty();
+    // API requests go to /portal.php. STBEmu uses /portal.php directly,
+    // TiviMate uses /server/load.php. Static assets use portal_root.
+    // Check the ORIGINAL query for API markers (type/action), not the
+    // proxy-built query_params (which includes MAC on every request).
+    let is_api = request_path.ends_with(".php")
+        || query.r#type.is_some()
+        || query.action.is_some();
     let api_base = if is_api {
         match url::Url::parse(&st.portal_base) {
             Ok(u) => {
