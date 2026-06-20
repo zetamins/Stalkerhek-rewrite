@@ -408,7 +408,7 @@ async fn proxy_handler(
         // Extract scheme+host from portal_base to build https://host/portal.php
         match url::Url::parse(&st.portal_base) {
             Ok(u) => {
-                let scheme = if u.scheme() == "http" { "https" } else { u.scheme() };
+                let scheme = u.scheme();
                 format!("{}://{}/portal.php", scheme, u.host_str().unwrap_or(""))
             }
             Err(_) => st.portal_base.clone()
